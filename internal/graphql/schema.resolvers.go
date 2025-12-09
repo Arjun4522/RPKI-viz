@@ -484,13 +484,49 @@ func (r *queryResolver) ValidatePrefix(ctx context.Context, asn int, prefix stri
 		}
 	}
 
-	// Get VRPs for validation
-	vrps, err := r.postgresClient.GetVRPs(ctx, 0, 0, nil, nil)
+	// Get ASN to get its ID
+	asnModel, err := r.postgresClient.GetASNByNumber(ctx, asn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get VRPs: %w", err)
+		return nil, fmt.Errorf("failed to get ASN: %w", err)
+	}
+	if asnModel == nil {
+		return &model.ValidationResponse{
+			ASN:    asn,
+			Prefix: prefix,
+			State:  model.NotFound,
+			Reason: "ASN not found",
+		}, nil
 	}
 
-	result := r.prefixValidator.ValidatePrefix(asn, prefix, vrps)
+	// Get prefix to get its ID
+	prefixModel, err := r.postgresClient.GetPrefixByCIDR(ctx, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get prefix: %w", err)
+	}
+	if prefixModel == nil {
+		return &model.ValidationResponse{
+			ASN:    asn,
+			Prefix: prefix,
+			State:  model.NotFound,
+			Reason: "Prefix not found in database",
+		}, nil
+	}
+
+	// Get VRPs for this ASN and prefix
+	vrps, err := r.postgresClient.GetVRPsByPrefix(ctx, prefixModel.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VRPs for prefix: %w", err)
+	}
+
+	// Filter VRPs to only those for the ASN
+	var asnVrps []*model.VRP
+	for _, vrp := range vrps {
+		if vrp.ASNID == asnModel.ID {
+			asnVrps = append(asnVrps, vrp)
+		}
+	}
+
+	result := r.prefixValidator.ValidatePrefix(asn, prefix, asnVrps)
 
 	response := &model.ValidationResponse{
 		ASN:    asn,
@@ -622,13 +658,13 @@ func (r *validationResponseResolver) MatchedVRPs(ctx context.Context, obj *model
 
 // ==================== Resolver Implementations ====================
 
-func (r *Resolver) ASN() ASNResolver { return &aSNResolver{r} }
+func (r *Resolver) ASN() ASNResolver                     { return &aSNResolver{r} }
 func (r *Resolver) GlobalSummary() GlobalSummaryResolver { return &globalSummaryResolver{r} }
-func (r *Resolver) Prefix() PrefixResolver { return &prefixResolver{r} }
-func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
-func (r *Resolver) ROA() ROAResolver { return &rOAResolver{r} }
-func (r *Resolver) TrustAnchor() TrustAnchorResolver { return &trustAnchorResolver{r} }
-func (r *Resolver) VRP() VRPResolver { return &vRPResolver{r} }
+func (r *Resolver) Prefix() PrefixResolver               { return &prefixResolver{r} }
+func (r *Resolver) Query() QueryResolver                 { return &queryResolver{r} }
+func (r *Resolver) ROA() ROAResolver                     { return &rOAResolver{r} }
+func (r *Resolver) TrustAnchor() TrustAnchorResolver     { return &trustAnchorResolver{r} }
+func (r *Resolver) VRP() VRPResolver                     { return &vRPResolver{r} }
 func (r *Resolver) ValidationResponse() ValidationResponseResolver {
 	return &validationResponseResolver{r}
 }

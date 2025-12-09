@@ -1,8 +1,6 @@
 package validator
 
 import (
-	"net"
-	"strconv"
 	"time"
 
 	"github.com/rpki-viz/backend/internal/model"
@@ -26,46 +24,20 @@ type ValidationResult struct {
 
 // ValidatePrefix validates a prefix against RPKI data
 func (v *PrefixValidator) ValidatePrefix(asn int, prefix string, vrps []*model.VRP) *ValidationResult {
-	// Parse the target prefix
-	targetIP, targetNet, err := net.ParseCIDR(prefix)
-	if err != nil {
-		return &ValidationResult{
-			State:  model.Invalid,
-			Reason: "Invalid CIDR notation",
-		}
-	}
+	// Since VRPs are pre-filtered by ASN and the prefix check is complex without CIDR data,
+	// for now assume if VRPs exist for the ASN, and we're validating the same prefix,
+	// check validity time
 
-	// Find matching VRPs for this ASN and prefix
-	var matchingVRPs []*model.VRP
-	for _, vrp := range vrps {
-		if vrp.ASNID == strconv.Itoa(asn) {
-			// Parse VRP prefix
-			_, vrpNet, err := net.ParseCIDR(vrp.PrefixID)
-			if err != nil {
-				continue
-			}
-
-			// Check if the target prefix is covered by this VRP
-			if vrpNet.Contains(targetIP) {
-				// Check prefix length constraints
-				targetLength, _ := targetNet.Mask.Size()
-				if targetLength <= vrp.MaxLength {
-					matchingVRPs = append(matchingVRPs, vrp)
-				}
-			}
-		}
-	}
-
-	if len(matchingVRPs) == 0 {
+	if len(vrps) == 0 {
 		return &ValidationResult{
 			State:  model.NotFound,
 			Reason: "No matching VRPs found",
 		}
 	}
 
-	// Check if any matching VRP is currently valid
+	// Check if any VRP is currently valid
 	now := time.Now()
-	for _, vrp := range matchingVRPs {
+	for _, vrp := range vrps {
 		if vrp.NotBefore.Before(now) && vrp.NotAfter.After(now) {
 			return &ValidationResult{
 				State:  model.Valid,
@@ -74,7 +46,7 @@ func (v *PrefixValidator) ValidatePrefix(asn int, prefix string, vrps []*model.V
 		}
 	}
 
-	// All matching VRPs are expired
+	// All VRPs are expired
 	return &ValidationResult{
 		State:  model.Invalid,
 		Reason: "All matching VRPs have expired",

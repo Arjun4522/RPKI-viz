@@ -530,21 +530,13 @@ func (r *queryResolver) ValidatePrefix(ctx context.Context, asn int, prefix stri
 		}, nil
 	}
 
-	// Get VRPs for this ASN and prefix
-	vrps, err := r.postgresClient.GetVRPsByPrefix(ctx, prefixModel.ID)
+	// Get all VRPs for this ASN
+	vrps, err := r.postgresClient.GetVRPsByASN(ctx, asnModel.ID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get VRPs for prefix: %w", err)
+		return nil, fmt.Errorf("failed to get VRPs for ASN: %w", err)
 	}
 
-	// Filter VRPs to only those for the ASN
-	var asnVrps []*model.VRP
-	for _, vrp := range vrps {
-		if vrp.ASNID == asnModel.ID {
-			asnVrps = append(asnVrps, vrp)
-		}
-	}
-
-	result := r.prefixValidator.ValidatePrefix(asn, prefix, asnVrps)
+	result := r.prefixValidator.ValidatePrefix(asn, prefix, vrps)
 
 	response := &model.ValidationResponse{
 		ASN:    asn,
@@ -660,10 +652,28 @@ func (r *validationResponseResolver) MatchedVRPs(ctx context.Context, obj *model
 		return nil, fmt.Errorf("ValidationResponse object is nil")
 	}
 
-	// Get VRPs that match this ASN and prefix
+	// Get ASN by number
+	asn, err := r.postgresClient.GetASNByNumber(ctx, obj.ASN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ASN: %w", err)
+	}
+	if asn == nil {
+		return []*model.VRP{}, nil
+	}
+
+	// Get prefix by CIDR
+	prefix, err := r.postgresClient.GetPrefixByCIDR(ctx, obj.Prefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get prefix: %w", err)
+	}
+	if prefix == nil {
+		return []*model.VRP{}, nil
+	}
+
+	// Get VRPs for this ASN and prefix combination
 	filterMap := map[string]interface{}{
-		"asn":    obj.ASN,
-		"prefix": obj.Prefix,
+		"asnId":    asn.ID,
+		"prefixId": prefix.ID,
 	}
 
 	vrps, err := r.postgresClient.GetVRPs(ctx, 0, 0, nil, filterMap)

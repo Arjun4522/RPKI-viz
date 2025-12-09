@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -23,97 +22,23 @@ func NewROAProcessor() *ROAProcessor {
 
 // ProcessROA converts a ROA into VRPs
 func (p *ROAProcessor) ProcessROA(roa *model.ROA, prefix *model.Prefix) ([]*model.VRP, error) {
-	var vrps []*model.VRP
+	// In RPKI, each ROA creates exactly one VRP: (ASN, prefix, maxLength)
+	// The VRP represents authorization for the exact prefix and any more specific routes up to maxLength
+	// You don't pre-generate all possible sub-prefixes - validation checks if routes match the VRP
 
-	// Parse the CIDR prefix
-	_, ipNet, err := net.ParseCIDR(prefix.CIDR)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CIDR prefix %s: %w", prefix.CIDR, err)
+	vrp := &model.VRP{
+		ID:        uuid.New().String(),
+		ASNID:     roa.ASNID,
+		PrefixID:  prefix.ID,
+		MaxLength: roa.MaxLength,
+		NotBefore: roa.NotBefore,
+		NotAfter:  roa.NotAfter,
+		ROAID:     roa.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 
-	// Calculate the maximum prefix length
-	maxLength := roa.MaxLength
-	if maxLength == 0 {
-		// If maxLength is not specified, use the prefix length
-		maxLength = prefix.MaxLength
-	}
-
-	// Generate VRPs for all prefixes from the ROA prefix length to maxLength
-	prefixLength, _ := ipNet.Mask.Size()
-
-	// Validate maxLength
-	if maxLength < prefixLength {
-		maxLength = prefixLength
-	}
-
-	// Generate VRPs for each possible prefix length
-	for length := prefixLength; length <= maxLength; length++ {
-		// Generate all possible prefixes at this length
-		subnets := p.generateSubnetsForLength(ipNet, length)
-
-		for _, subnet := range subnets {
-			_ = subnet // Mark as used to avoid compiler warning
-			vrp := &model.VRP{
-				ID:        uuid.New().String(),
-				ASNID:     roa.ASNID,
-				PrefixID:  prefix.ID,
-				MaxLength: maxLength,
-				NotBefore: roa.NotBefore,
-				NotAfter:  roa.NotAfter,
-				ROAID:     roa.ID,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			}
-
-			vrps = append(vrps, vrp)
-		}
-	}
-
-	return vrps, nil
-}
-
-// generateSubnetsForLength generates all possible subnets of a specific length from a base prefix
-func (p *ROAProcessor) generateSubnetsForLength(baseNet *net.IPNet, targetLength int) []string {
-	var subnets []string
-
-	baseLength, _ := baseNet.Mask.Size()
-	if targetLength < baseLength {
-		return subnets
-	}
-
-	// Calculate the number of subnets
-	numSubnets := 1 << (targetLength - baseLength)
-
-	// Get the base IP as a 16-byte array
-	baseIP := baseNet.IP.To16()
-	if baseIP == nil {
-		return subnets
-	}
-
-	// Generate each subnet
-	for i := 0; i < numSubnets; i++ {
-		// Calculate the new IP
-		newIP := make(net.IP, len(baseIP))
-		copy(newIP, baseIP)
-
-		// Add the subnet offset
-		byteOffset := (baseLength + i*(1<<(targetLength-baseLength))) / 8
-		bitOffset := (baseLength + i*(1<<(targetLength-baseLength))) % 8
-
-		if byteOffset < len(newIP) {
-			newIP[byteOffset] |= byte(i << (8 - bitOffset))
-		}
-
-		// Create the new CIDR
-		subnet := &net.IPNet{
-			IP:   newIP,
-			Mask: net.CIDRMask(targetLength, len(newIP)*8),
-		}
-
-		subnets = append(subnets, subnet.String())
-	}
-
-	return subnets
+	return []*model.VRP{vrp}, nil
 }
 
 // ValidateROA validates a ROA's cryptographic signature and structure
@@ -234,20 +159,20 @@ type PrefixInfo struct {
 // parseROAFile parses a ROA file using proper DER decoding
 func (p *ROAProcessor) parseROAFile(roaData []byte) (*ROAInfo, error) {
 	// Use the cfrpki library to properly decode the ROA file
-	rpkiROA, err := librpki.DecodeROA(roaData)
+	roaInfo, err := librpki.DecodeROA(roaData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode ROA: %w", err)
 	}
 
 	info := &ROAInfo{
-		ASN:       rpkiROA.ASN,
+		ASN:       roaInfo.ASN,
 		Prefixes:  []PrefixInfo{},
-		NotBefore: rpkiROA.SigningTime,
-		NotAfter:  rpkiROA.SigningTime.Add(365 * 24 * time.Hour), // Default 1 year validity
+		NotBefore: roaInfo.SigningTime,
+		NotAfter:  roaInfo.SigningTime.Add(365 * 24 * time.Hour), // Default 1 year validity
 	}
 
 	// Extract prefixes from ROA entries
-	for _, entry := range rpkiROA.Entries {
+	for _, entry := range roaInfo.Entries {
 		if entry.IPNet != nil {
 			prefix := entry.IPNet.String()
 			maxLength := entry.MaxLength

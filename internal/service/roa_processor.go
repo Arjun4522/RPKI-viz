@@ -3,10 +3,10 @@ package service
 import (
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 
+	librpki "github.com/cloudflare/cfrpki/validator/lib"
 	"github.com/google/uuid"
 	"github.com/rpki-viz/backend/internal/model"
 )
@@ -157,6 +157,10 @@ func (p *ROAProcessor) ValidateROA(roa *model.ROA, certificate *model.Certificat
 
 // ExtractVRPsFromROAFile processes an ROA file and extracts VRPs
 func (p *ROAProcessor) ExtractVRPsFromROAFile(roaData []byte, tal *model.TrustAnchor) ([]*model.VRP, error) {
+	if tal == nil {
+		return nil, fmt.Errorf("trust anchor cannot be nil")
+	}
+
 	// Parse ROA data (DER format expected)
 	roaInfo, err := p.parseROAFile(roaData)
 	if err != nil {
@@ -227,69 +231,32 @@ type PrefixInfo struct {
 	MaxLength int
 }
 
-// parseROAFile parses a ROA file (simplified implementation)
+// parseROAFile parses a ROA file using proper DER decoding
 func (p *ROAProcessor) parseROAFile(roaData []byte) (*ROAInfo, error) {
-	// This is a simplified implementation
-	// In a real implementation, you would:
-	// 1. Parse the DER-encoded ROA structure
-	// 2. Extract the ASN and prefixes
-	// 3. Validate the signature
-	// 4. Extract validity periods
-
-	// For now, we'll simulate parsing based on common ROA formats
-	roaStr := string(roaData)
+	// Use the cfrpki library to properly decode the ROA file
+	rpkiROA, err := librpki.DecodeROA(roaData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode ROA: %w", err)
+	}
 
 	info := &ROAInfo{
-		Prefixes: []PrefixInfo{},
+		ASN:       rpkiROA.ASN,
+		Prefixes:  []PrefixInfo{},
+		NotBefore: rpkiROA.SigningTime,
+		NotAfter:  rpkiROA.SigningTime.Add(365 * 24 * time.Hour), // Default 1 year validity
 	}
 
-	// Extract ASN
-	if strings.Contains(roaStr, "AS:") {
-		lines := strings.Split(roaStr, "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "AS:") {
-				asnStr := strings.TrimSpace(strings.TrimPrefix(line, "AS:"))
-				asn, err := strconv.Atoi(asnStr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid ASN: %s", asnStr)
-				}
-				info.ASN = asn
-				break
-			}
+	// Extract prefixes from ROA entries
+	for _, entry := range rpkiROA.Entries {
+		if entry.IPNet != nil {
+			prefix := entry.IPNet.String()
+			maxLength := entry.MaxLength
+
+			info.Prefixes = append(info.Prefixes, PrefixInfo{
+				Prefix:    prefix,
+				MaxLength: maxLength,
+			})
 		}
-	}
-
-	// Extract prefixes
-	lines := strings.Split(roaStr, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Prefix:") {
-			prefixStr := strings.TrimSpace(strings.TrimPrefix(line, "Prefix:"))
-			parts := strings.Fields(prefixStr)
-			if len(parts) > 0 {
-				prefix := parts[0]
-				maxLength := 24 // Default
-
-				// Try to extract max length
-				if len(parts) > 1 {
-					if ml, err := strconv.Atoi(parts[1]); err == nil {
-						maxLength = ml
-					}
-				}
-
-				info.Prefixes = append(info.Prefixes, PrefixInfo{
-					Prefix:    prefix,
-					MaxLength: maxLength,
-				})
-			}
-		}
-	}
-
-	// Set default validity periods if not found
-	if info.NotBefore.IsZero() {
-		info.NotBefore = time.Now()
-	}
-	if info.NotAfter.IsZero() {
-		info.NotAfter = time.Now().Add(365 * 24 * time.Hour) // 1 year
 	}
 
 	return info, nil

@@ -2,6 +2,7 @@ package ingestor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -69,14 +70,32 @@ func (i *Ingestor) ensureTrustAnchors(ctx context.Context) error {
 			sha256: "",
 		},
 		{
-			name:   "Cloudflare",
-			uri:    "https://rpki.cloudflare.com/",
+			name:   "AFRINIC",
+			uri:    "rsync://rpki.afrinic.net/repository/",
 			rsaKey: "",
 			sha256: "",
 		},
 		{
-			name:   "NLnet Labs",
-			uri:    "https://nlnetlabs.nl/",
+			name:   "APNIC",
+			uri:    "rsync://rpki.apnic.net/repository/",
+			rsaKey: "",
+			sha256: "",
+		},
+		{
+			name:   "ARIN",
+			uri:    "rsync://rpki.arin.net/repository/",
+			rsaKey: "",
+			sha256: "",
+		},
+		{
+			name:   "LACNIC",
+			uri:    "rsync://repository.lacnic.net/rpki/",
+			rsaKey: "",
+			sha256: "",
+		},
+		{
+			name:   "Cloudflare",
+			uri:    "https://rpki.cloudflare.com/",
 			rsaKey: "",
 			sha256: "",
 		},
@@ -108,21 +127,71 @@ func (i *Ingestor) IngestFromRIPE(ctx context.Context) error {
 	return nil
 }
 
-// IngestFromCloudflare ingests data from Cloudflare sources
-func (i *Ingestor) IngestFromCloudflare(ctx context.Context) error {
-	// Ingest from Cloudflare RPKI JSON feed
-	if err := i.ingestFromCloudflareJSON(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from Cloudflare JSON: %w", err)
+// IngestFromAFRINIC ingests data from AFRINIC sources
+func (i *Ingestor) IngestFromAFRINIC(ctx context.Context) error {
+	// Ingest from AFRINIC RRDP
+	if err := i.ingestFromAFRINICRRDP(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from AFRINIC RRDP: %w", err)
+	}
+
+	// Ingest from AFRINIC rsync
+	if err := i.ingestFromAFRINICRsync(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from AFRINIC rsync: %w", err)
 	}
 
 	return nil
 }
 
-// IngestFromRoutinator ingests data from NLnet Labs Routinator
-func (i *Ingestor) IngestFromRoutinator(ctx context.Context) error {
-	// Ingest from Routinator HTTP API
-	if err := i.ingestFromRoutinatorAPI(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from Routinator API: %w", err)
+// IngestFromAPNIC ingests data from APNIC sources
+func (i *Ingestor) IngestFromAPNIC(ctx context.Context) error {
+	// Ingest from APNIC RRDP
+	if err := i.ingestFromAPNICRRDP(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from APNIC RRDP: %w", err)
+	}
+
+	// Ingest from APNIC rsync
+	if err := i.ingestFromAPNICRsync(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from APNIC rsync: %w", err)
+	}
+
+	return nil
+}
+
+// IngestFromARIN ingests data from ARIN sources
+func (i *Ingestor) IngestFromARIN(ctx context.Context) error {
+	// Ingest from ARIN RRDP
+	if err := i.ingestFromARINRRDP(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from ARIN RRDP: %w", err)
+	}
+
+	// Ingest from ARIN rsync
+	if err := i.ingestFromARINRsync(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from ARIN rsync: %w", err)
+	}
+
+	return nil
+}
+
+// IngestFromLACNIC ingests data from LACNIC sources
+func (i *Ingestor) IngestFromLACNIC(ctx context.Context) error {
+	// Ingest from LACNIC RRDP
+	if err := i.ingestFromLACNICRRDP(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from LACNIC RRDP: %w", err)
+	}
+
+	// Ingest from LACNIC rsync
+	if err := i.ingestFromLACNICRsync(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from LACNIC rsync: %w", err)
+	}
+
+	return nil
+}
+
+// IngestFromCloudflare ingests data from Cloudflare sources
+func (i *Ingestor) IngestFromCloudflare(ctx context.Context) error {
+	// Ingest from Cloudflare RPKI JSON feed
+	if err := i.ingestFromCloudflareJSON(ctx); err != nil {
+		return fmt.Errorf("failed to ingest from Cloudflare JSON: %w", err)
 	}
 
 	return nil
@@ -180,7 +249,21 @@ func (i *Ingestor) ingestFromRIPERRDP(ctx context.Context) error {
 		// Process snapshot data to extract ROAs
 		for _, publish := range snapshot.Publishes {
 			if strings.HasSuffix(publish.URI, ".roa") {
-				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile([]byte(publish.Data), nil)
+				// Decode base64 data from RRDP
+				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				if err != nil {
+					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				// Get RIPE trust anchor
+				ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "RIPE NCC", "rsync://rpki.ripe.net/repository/", "", "")
+				if err != nil {
+					fmt.Printf("Error getting RIPE trust anchor for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
@@ -203,6 +286,250 @@ func (i *Ingestor) ingestFromRIPERsync(ctx context.Context) error {
 	}
 
 	fmt.Printf("Synced RIPE repository to %s\n", localPath)
+	return nil
+}
+
+// ingestFromAFRINICRRDP ingests from AFRINIC RRDP
+func (i *Ingestor) ingestFromAFRINICRRDP(ctx context.Context) error {
+	notificationURL := "https://rrdp.afrinic.net/notification.xml"
+
+	notification, err := i.rrdpClient.FetchNotification(notificationURL)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Fetched AFRINIC RRDP notification with serial %d\n", notification.Serial)
+
+	if notification.Snapshot.URI != "" {
+		snapshot, err := i.rrdpClient.FetchSnapshot(notification.Snapshot.URI)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Fetched AFRINIC snapshot with %d publishes\n", len(snapshot.Publishes))
+
+		for _, publish := range snapshot.Publishes {
+			if strings.HasSuffix(publish.URI, ".roa") {
+				// Decode base64 data from RRDP
+				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				if err != nil {
+					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				// Get AFRINIC trust anchor
+				ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "AFRINIC", "rsync://rpki.afrinic.net/repository/", "", "")
+				if err != nil {
+					fmt.Printf("Error getting AFRINIC trust anchor for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				if err != nil {
+					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
+			}
+		}
+	}
+
+	return nil
+}
+
+// ingestFromAFRINICRsync ingests from AFRINIC rsync
+func (i *Ingestor) ingestFromAFRINICRsync(ctx context.Context) error {
+	rsyncURI := "rsync://rpki.afrinic.net/repository/"
+	localPath := "/tmp/rpki-afrinic"
+
+	if err := i.rsyncClient.Sync(rsyncURI, localPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Synced AFRINIC repository to %s\n", localPath)
+	return nil
+}
+
+// ingestFromAPNICRRDP ingests from APNIC RRDP
+func (i *Ingestor) ingestFromAPNICRRDP(ctx context.Context) error {
+	notificationURL := "https://rrdp.apnic.net/notification.xml"
+
+	notification, err := i.rrdpClient.FetchNotification(notificationURL)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Fetched APNIC RRDP notification with serial %d\n", notification.Serial)
+
+	if notification.Snapshot.URI != "" {
+		snapshot, err := i.rrdpClient.FetchSnapshot(notification.Snapshot.URI)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Fetched APNIC snapshot with %d publishes\n", len(snapshot.Publishes))
+
+		for _, publish := range snapshot.Publishes {
+			if strings.HasSuffix(publish.URI, ".roa") {
+				// Decode base64 data from RRDP
+				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				if err != nil {
+					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				// Get APNIC trust anchor
+				ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "APNIC", "rsync://rpki.apnic.net/repository/", "", "")
+				if err != nil {
+					fmt.Printf("Error getting APNIC trust anchor for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				if err != nil {
+					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
+			}
+		}
+	}
+
+	return nil
+}
+
+// ingestFromAPNICRsync ingests from APNIC rsync
+func (i *Ingestor) ingestFromAPNICRsync(ctx context.Context) error {
+	rsyncURI := "rsync://rpki.apnic.net/repository/"
+	localPath := "/tmp/rpki-apnic"
+
+	if err := i.rsyncClient.Sync(rsyncURI, localPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Synced APNIC repository to %s\n", localPath)
+	return nil
+}
+
+// ingestFromARINRRDP ingests from ARIN RRDP
+func (i *Ingestor) ingestFromARINRRDP(ctx context.Context) error {
+	notificationURL := "https://rrdp.arin.net/notification.xml"
+
+	notification, err := i.rrdpClient.FetchNotification(notificationURL)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Fetched ARIN RRDP notification with serial %d\n", notification.Serial)
+
+	if notification.Snapshot.URI != "" {
+		snapshot, err := i.rrdpClient.FetchSnapshot(notification.Snapshot.URI)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Fetched ARIN snapshot with %d publishes\n", len(snapshot.Publishes))
+
+		for _, publish := range snapshot.Publishes {
+			if strings.HasSuffix(publish.URI, ".roa") {
+				// Decode base64 data from RRDP
+				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				if err != nil {
+					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				// Get ARIN trust anchor
+				ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "ARIN", "rsync://rpki.arin.net/repository/", "", "")
+				if err != nil {
+					fmt.Printf("Error getting ARIN trust anchor for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				if err != nil {
+					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
+			}
+		}
+	}
+
+	return nil
+}
+
+// ingestFromARINRsync ingests from ARIN rsync
+func (i *Ingestor) ingestFromARINRsync(ctx context.Context) error {
+	rsyncURI := "rsync://rpki.arin.net/repository/"
+	localPath := "/tmp/rpki-arin"
+
+	if err := i.rsyncClient.Sync(rsyncURI, localPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Synced ARIN repository to %s\n", localPath)
+	return nil
+}
+
+// ingestFromLACNICRRDP ingests from LACNIC RRDP
+func (i *Ingestor) ingestFromLACNICRRDP(ctx context.Context) error {
+	notificationURL := "https://rrdp.lacnic.net/rrdp/notification.xml"
+
+	notification, err := i.rrdpClient.FetchNotification(notificationURL)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Fetched LACNIC RRDP notification with serial %d\n", notification.Serial)
+
+	if notification.Snapshot.URI != "" {
+		snapshot, err := i.rrdpClient.FetchSnapshot(notification.Snapshot.URI)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Fetched LACNIC snapshot with %d publishes\n", len(snapshot.Publishes))
+
+		for _, publish := range snapshot.Publishes {
+			if strings.HasSuffix(publish.URI, ".roa") {
+				// Decode base64 data from RRDP
+				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				if err != nil {
+					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				// Get LACNIC trust anchor
+				ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "LACNIC", "rsync://repository.lacnic.net/rpki/", "", "")
+				if err != nil {
+					fmt.Printf("Error getting LACNIC trust anchor for ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				if err != nil {
+					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
+					continue
+				}
+				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
+			}
+		}
+	}
+
+	return nil
+}
+
+// ingestFromLACNICRsync ingests from LACNIC rsync
+func (i *Ingestor) ingestFromLACNICRsync(ctx context.Context) error {
+	rsyncURI := "rsync://repository.lacnic.net/rpki/"
+	localPath := "/tmp/rpki-lacnic"
+
+	if err := i.rsyncClient.Sync(rsyncURI, localPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Synced LACNIC repository to %s\n", localPath)
 	return nil
 }
 
@@ -232,35 +559,6 @@ func (i *Ingestor) ingestFromCloudflareJSON(ctx context.Context) error {
 	}
 
 	fmt.Printf("Ingested from Cloudflare: %d ROAs, %d VRPs\n", len(roas), len(vrps))
-	return nil
-}
-
-// ingestFromRoutinatorAPI ingests from Routinator HTTP API
-func (i *Ingestor) ingestFromRoutinatorAPI(ctx context.Context) error {
-	url := "http://localhost:9556/json" // Default Routinator port
-
-	resp, err := i.httpClient.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	// Parse and process Routinator data
-	roas, vrps, err := i.processRoutinatorData(ctx, body)
-	if err != nil {
-		return fmt.Errorf("failed to process Routinator data: %w", err)
-	}
-
-	fmt.Printf("Ingested from Routinator: %d ROAs, %d VRPs\n", len(roas), len(vrps))
 	return nil
 }
 
@@ -346,109 +644,6 @@ func (i *Ingestor) processCloudflareData(ctx context.Context, rawData []byte) ([
 		vrpList, err := i.roaProcessor.ProcessROA(roa, prefix)
 		if err != nil {
 			fmt.Printf("Error processing ROA for AS%d %s: %v\n", cfRoa.ASN, cfRoa.Prefix, err)
-			continue
-		}
-
-		// Insert VRPs
-		for _, vrp := range vrpList {
-			vrp.ROAID = roa.ID
-			if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-				fmt.Printf("Error inserting VRP: %v\n", err)
-			}
-		}
-
-		roas = append(roas, roa)
-		vrps = append(vrps, vrpList...)
-	}
-
-	return roas, vrps, nil
-}
-
-// RoutinatorJSON represents the Routinator JSON structure
-type RoutinatorJSON struct {
-	Roas []struct {
-		ASN         int    `json:"asn"`
-		Prefix      string `json:"prefix"`
-		MaxLength   int    `json:"maxLength"`
-		TrustAnchor string `json:"trustAnchor"`
-		Validity    struct {
-			NotBefore int64 `json:"notBefore"`
-			NotAfter  int64 `json:"notAfter"`
-		} `json:"validity"`
-	} `json:"roas"`
-}
-
-// processRoutinatorData processes Routinator JSON data into ROAs and VRPs
-func (i *Ingestor) processRoutinatorData(ctx context.Context, rawData []byte) ([]*model.ROA, []*model.VRP, error) {
-	var rtData RoutinatorJSON
-	if err := json.Unmarshal(rawData, &rtData); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse Routinator JSON: %w", err)
-	}
-
-	var roas []*model.ROA
-	var vrps []*model.VRP
-
-	for _, rtRoa := range rtData.Roas {
-		// Get or create ASN
-		asn, err := i.dbClient.GetOrCreateASN(ctx, rtRoa.ASN, fmt.Sprintf("AS%d", rtRoa.ASN), "")
-		if err != nil {
-			fmt.Printf("Error getting/creating ASN %d: %v\n", rtRoa.ASN, err)
-			continue
-		}
-
-		// Get or create Prefix
-		prefix, err := i.dbClient.GetPrefixByCIDR(ctx, rtRoa.Prefix)
-		if err != nil {
-			fmt.Printf("Error getting prefix %s: %v\n", rtRoa.Prefix, err)
-			continue
-		}
-		if prefix == nil {
-			prefix = &model.Prefix{
-				ID:              uuid.New().String(),
-				CIDR:            rtRoa.Prefix,
-				ASNID:           asn.ID,
-				MaxLength:       rtRoa.MaxLength,
-				ValidationState: "UNKNOWN",
-				CreatedAt:       time.Now(),
-				UpdatedAt:       time.Now(),
-			}
-			if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-				fmt.Printf("Error inserting prefix %s: %v\n", rtRoa.Prefix, err)
-				continue
-			}
-		}
-
-		// Get trust anchor
-		ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "NLnet Labs", "https://nlnetlabs.nl/", "", "")
-		if err != nil {
-			fmt.Printf("Error getting trust anchor for Routinator: %v\n", err)
-			continue
-		}
-
-		// Create ROA
-		roa := &model.ROA{
-			ID:        uuid.New().String(),
-			ASNID:     asn.ID,
-			PrefixID:  prefix.ID,
-			MaxLength: rtRoa.MaxLength,
-			NotBefore: time.Unix(rtRoa.Validity.NotBefore, 0),
-			NotAfter:  time.Unix(rtRoa.Validity.NotAfter, 0),
-			Signature: "",
-			TALID:     ta.ID,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-
-		// Insert ROA
-		if err := i.dbClient.InsertROA(ctx, roa); err != nil {
-			fmt.Printf("Error inserting ROA for AS%d %s: %v\n", rtRoa.ASN, rtRoa.Prefix, err)
-			continue
-		}
-
-		// Generate VRPs from this ROA
-		vrpList, err := i.roaProcessor.ProcessROA(roa, prefix)
-		if err != nil {
-			fmt.Printf("Error processing ROA for AS%d %s: %v\n", rtRoa.ASN, rtRoa.Prefix, err)
 			continue
 		}
 
@@ -696,9 +891,12 @@ func (i *Ingestor) IngestFromAllSources(ctx context.Context) error {
 	}
 
 	sources := []func(context.Context) error{
-		// i.IngestFromRIPE,
+		i.IngestFromRIPE,
+		i.IngestFromAFRINIC,
+		i.IngestFromAPNIC,
+		i.IngestFromARIN,
+		i.IngestFromLACNIC,
 		i.IngestFromCloudflare,
-		// i.IngestFromRoutinator,
 	}
 
 	for _, source := range sources {

@@ -1,0 +1,378 @@
+"""
+RPKI Visualization Platform GraphQL Schema
+"""
+
+type Query {
+  """
+  Get a single ASN by number
+  """
+  asn(number: Int!): ASN
+  
+  """
+  Get a list of ASNs with filtering options
+  """
+  asns(
+    first: Int
+    offset: Int
+    orderBy: ASNOrder
+    filter: ASNFilter
+  ): ASNConnection!
+  
+  """
+  Get a single prefix by CIDR notation
+  """
+  prefix(cidr: String!): Prefix
+  
+  """
+  Get a list of prefixes with filtering options
+  """
+  prefixes(
+    first: Int
+    offset: Int
+    orderBy: PrefixOrder
+    filter: PrefixFilter
+  ): PrefixConnection!
+  
+  """
+  Get a single ROA by ID
+  """
+  roa(id: ID!): ROA
+  
+  """
+  Get a list of ROAs with filtering options
+  """
+  roas(
+    first: Int
+    offset: Int
+    orderBy: ROAOrder
+    filter: ROAFilter
+  ): ROAConnection!
+  
+  """
+  Get a single VRP by ID
+  """
+  vrp(id: ID!): VRP
+  
+  """
+  Get a list of VRPs with filtering options
+  """
+  vrps(
+    first: Int
+    offset: Int
+    orderBy: VRPOrder
+    filter: VRPFilter
+  ): VRPConnection!
+  
+  """
+  Get a single trust anchor by ID
+  """
+  trustAnchor(id: ID!): TrustAnchor
+  
+  """
+  Get a list of trust anchors
+  """
+  trustAnchors: [TrustAnchor!]!
+  
+  """
+  Get global summary metrics
+  """
+  globalSummary: GlobalSummary!
+  
+  """
+  Validate a prefix against RPKI data
+  """
+  validatePrefix(asn: Int!, prefix: String!): ValidationResponse!
+}
+
+"""
+Autonomous System Number
+"""
+type ASN {
+  id: ID!
+  number: Int!
+  name: String
+  country: String
+  prefixes: [Prefix!]!
+  roas: [ROA!]!
+  vrps: [VRP!]!
+  validationState: ValidationState!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+enum ASNOrderField {
+  NUMBER
+  NAME
+  CREATED_AT
+  UPDATED_AT
+}
+
+input ASNOrder {
+  field: ASNOrderField!
+  direction: OrderDirection!
+}
+
+input ASNFilter {
+  number: Int
+  name: String
+  country: String
+  hasROAs: Boolean
+  hasVRPs: Boolean
+  validationState: ValidationState
+}
+
+type ASNEdge {
+  node: ASN!
+  cursor: String!
+}
+
+type ASNConnection {
+  edges: [ASNEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+"""
+IP Prefix in CIDR notation
+"""
+type Prefix {
+  id: ID!
+  cidr: String!
+  asn: ASN!
+  roa: ROA
+  vrp: VRP
+  validationState: ValidationState!
+  maxLength: Int
+  expiresAt: Time
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+enum PrefixOrderField {
+  CIDR
+  ASN
+  VALIDATION_STATE
+  CREATED_AT
+  UPDATED_AT
+}
+
+input PrefixOrder {
+  field: PrefixOrderField!
+  direction: OrderDirection!
+}
+
+input PrefixFilter {
+  cidr: String
+  asn: Int
+  validationState: ValidationState
+  hasROA: Boolean
+  hasVRP: Boolean
+}
+
+type PrefixEdge {
+  node: Prefix!
+  cursor: String!
+}
+
+type PrefixConnection {
+  edges: [PrefixEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+"""
+RPKI Certificate
+"""
+type Certificate {
+  id: ID!
+  subject: String!
+  issuer: String!
+  serialNumber: String!
+  notBefore: Time!
+  notAfter: Time!
+  subjectKeyIdentifier: String!
+  authorityKeyIdentifier: String!
+  crlDistributionPoints: [String!]!
+  authorityInfoAccess: [String!]!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+"""
+Route Origin Authorization
+"""
+type ROA {
+  id: ID!
+  asn: ASN!
+  prefix: Prefix!
+  maxLength: Int!
+  validity: Validity!
+  certificates: [Certificate!]!
+  signature: String!
+  tal: TrustAnchor!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+enum ROAOrderField {
+  ASN
+  PREFIX
+  MAX_LENGTH
+  CREATED_AT
+  UPDATED_AT
+}
+
+input ROAOrder {
+  field: ROAOrderField!
+  direction: OrderDirection!
+}
+
+input ROAFilter {
+  asn: Int
+  prefix: String
+  tal: ID
+  isValid: Boolean
+}
+
+type ROAEdge {
+  node: ROA!
+  cursor: String!
+}
+
+type ROAConnection {
+  edges: [ROAEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+"""
+Validated ROA Payload
+"""
+type VRP {
+  id: ID!
+  asn: ASN!
+  prefix: Prefix!
+  maxLength: Int!
+  validity: Validity!
+  roa: ROA!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+enum VRPOrderField {
+  ASN
+  PREFIX
+  MAX_LENGTH
+  CREATED_AT
+  UPDATED_AT
+}
+
+input VRPOrder {
+  field: VRPOrderField!
+  direction: OrderDirection!
+}
+
+input VRPFilter {
+  asn: Int
+  prefix: String
+  isValid: Boolean
+}
+
+type VRPEdge {
+  node: VRP!
+  cursor: String!
+}
+
+type VRPConnection {
+  edges: [VRPEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+"""
+Trust Anchor Locator
+"""
+type TrustAnchor {
+  id: ID!
+  name: String!
+  uri: String!
+  rsaKey: String!
+  sha256: String!
+  certificates: [Certificate!]!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+"""
+Validity period for ROAs and VRPs
+"""
+type Validity {
+  notBefore: Time!
+  notAfter: Time!
+}
+
+"""
+Global summary metrics
+"""
+type GlobalSummary {
+  totalASNs: Int!
+  totalPrefixes: Int!
+  totalROAs: Int!
+  totalVRPs: Int!
+  validPrefixes: Int!
+  invalidPrefixes: Int!
+  notFoundPrefixes: Int!
+  rirStats: [RIRStat!]!
+  validationStats: ValidationStats!
+}
+
+type RIRStat {
+  rir: String!
+  totalROAs: Int!
+  totalVRPs: Int!
+  validPrefixes: Int!
+  invalidPrefixes: Int!
+  notFoundPrefixes: Int!
+}
+
+type ValidationStats {
+  valid: Int!
+  invalid: Int!
+  notFound: Int!
+  unknown: Int!
+}
+
+"""
+Validation response for a prefix
+"""
+type ValidationResponse {
+  asn: Int!
+  prefix: String!
+  state: ValidationState!
+  matchedVRPs: [VRP!]!
+  reason: String
+}
+
+enum ValidationState {
+  VALID
+  INVALID
+  NOT_FOUND
+  UNKNOWN
+}
+
+enum OrderDirection {
+  ASC
+  DESC
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+"""
+Time scalar represents a RFC3339 formatted timestamp
+"""
+scalar Time

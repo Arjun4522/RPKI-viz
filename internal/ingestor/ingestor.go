@@ -27,6 +27,7 @@ type Ingestor struct {
 	dbClient     interface {
 		GetOrCreateASN(ctx context.Context, number int, name, country string) (*model.ASN, error)
 		GetOrCreateTrustAnchor(ctx context.Context, name, uri, rsaKey, sha256 string) (*model.TrustAnchor, error)
+		GetPrefixByCIDR(ctx context.Context, cidr string) (*model.Prefix, error)
 		InsertPrefix(ctx context.Context, prefix *model.Prefix) error
 		InsertROA(ctx context.Context, roa *model.ROA) error
 		InsertVRP(ctx context.Context, vrp *model.VRP) error
@@ -37,6 +38,7 @@ type Ingestor struct {
 func NewIngestor(dbClient interface {
 	GetOrCreateASN(ctx context.Context, number int, name, country string) (*model.ASN, error)
 	GetOrCreateTrustAnchor(ctx context.Context, name, uri, rsaKey, sha256 string) (*model.TrustAnchor, error)
+	GetPrefixByCIDR(ctx context.Context, cidr string) (*model.Prefix, error)
 	InsertPrefix(ctx context.Context, prefix *model.Prefix) error
 	InsertROA(ctx context.Context, roa *model.ROA) error
 	InsertVRP(ctx context.Context, vrp *model.VRP) error
@@ -92,11 +94,7 @@ func (i *Ingestor) ensureTrustAnchors(ctx context.Context) error {
 
 // IngestFromRIPE ingests data from RIPE NCC sources
 func (i *Ingestor) IngestFromRIPE(ctx context.Context) error {
-	// Ingest from RIPEstat RPKI Validation API
-	if err := i.ingestFromRIPEstat(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from RIPEstat: %w", err)
-	}
-
+	// Skip RIPEstat as it requires parameters and doesn't provide bulk data
 	// Ingest from RIPE RRDP
 	if err := i.ingestFromRIPERRDP(ctx); err != nil {
 		return fmt.Errorf("failed to ingest from RIPE RRDP: %w", err)
@@ -295,21 +293,26 @@ func (i *Ingestor) processCloudflareData(ctx context.Context, rawData []byte) ([
 			continue
 		}
 
-		// Create Prefix
-		prefix := &model.Prefix{
-			ID:              uuid.New().String(),
-			CIDR:            cfRoa.Prefix,
-			ASNID:           asn.ID,
-			MaxLength:       cfRoa.MaxLength,
-			ValidationState: "UNKNOWN",
-			CreatedAt:       time.Now(),
-			UpdatedAt:       time.Now(),
-		}
-
-		// Insert Prefix
-		if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-			fmt.Printf("Error inserting prefix %s: %v\n", cfRoa.Prefix, err)
+		// Get or create Prefix
+		prefix, err := i.dbClient.GetPrefixByCIDR(ctx, cfRoa.Prefix)
+		if err != nil {
+			fmt.Printf("Error getting prefix %s: %v\n", cfRoa.Prefix, err)
 			continue
+		}
+		if prefix == nil {
+			prefix = &model.Prefix{
+				ID:              uuid.New().String(),
+				CIDR:            cfRoa.Prefix,
+				ASNID:           asn.ID,
+				MaxLength:       cfRoa.MaxLength,
+				ValidationState: "UNKNOWN",
+				CreatedAt:       time.Now(),
+				UpdatedAt:       time.Now(),
+			}
+			if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
+				fmt.Printf("Error inserting prefix %s: %v\n", cfRoa.Prefix, err)
+				continue
+			}
 		}
 
 		// Get trust anchor
@@ -393,21 +396,26 @@ func (i *Ingestor) processRoutinatorData(ctx context.Context, rawData []byte) ([
 			continue
 		}
 
-		// Create Prefix
-		prefix := &model.Prefix{
-			ID:              uuid.New().String(),
-			CIDR:            rtRoa.Prefix,
-			ASNID:           asn.ID,
-			MaxLength:       rtRoa.MaxLength,
-			ValidationState: "UNKNOWN",
-			CreatedAt:       time.Now(),
-			UpdatedAt:       time.Now(),
-		}
-
-		// Insert Prefix
-		if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-			fmt.Printf("Error inserting prefix %s: %v\n", rtRoa.Prefix, err)
+		// Get or create Prefix
+		prefix, err := i.dbClient.GetPrefixByCIDR(ctx, rtRoa.Prefix)
+		if err != nil {
+			fmt.Printf("Error getting prefix %s: %v\n", rtRoa.Prefix, err)
 			continue
+		}
+		if prefix == nil {
+			prefix = &model.Prefix{
+				ID:              uuid.New().String(),
+				CIDR:            rtRoa.Prefix,
+				ASNID:           asn.ID,
+				MaxLength:       rtRoa.MaxLength,
+				ValidationState: "UNKNOWN",
+				CreatedAt:       time.Now(),
+				UpdatedAt:       time.Now(),
+			}
+			if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
+				fmt.Printf("Error inserting prefix %s: %v\n", rtRoa.Prefix, err)
+				continue
+			}
 		}
 
 		// Get trust anchor
@@ -503,21 +511,26 @@ func (i *Ingestor) processRIPEData(ctx context.Context, rawData []byte) ([]*mode
 			continue
 		}
 
-		// Create Prefix
-		prefix := &model.Prefix{
-			ID:              uuid.New().String(),
-			CIDR:            validation.Prefix,
-			ASNID:           asn.ID,
-			MaxLength:       validation.MaxLength,
-			ValidationState: "UNKNOWN",
-			CreatedAt:       time.Now(),
-			UpdatedAt:       time.Now(),
-		}
-
-		// Insert Prefix
-		if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-			fmt.Printf("Error inserting prefix %s: %v\n", validation.Prefix, err)
+		// Get or create Prefix
+		prefix, err := i.dbClient.GetPrefixByCIDR(ctx, validation.Prefix)
+		if err != nil {
+			fmt.Printf("Error getting prefix %s: %v\n", validation.Prefix, err)
 			continue
+		}
+		if prefix == nil {
+			prefix = &model.Prefix{
+				ID:              uuid.New().String(),
+				CIDR:            validation.Prefix,
+				ASNID:           asn.ID,
+				MaxLength:       validation.MaxLength,
+				ValidationState: "UNKNOWN",
+				CreatedAt:       time.Now(),
+				UpdatedAt:       time.Now(),
+			}
+			if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
+				fmt.Printf("Error inserting prefix %s: %v\n", validation.Prefix, err)
+				continue
+			}
 		}
 
 		// Get trust anchor
@@ -604,20 +617,26 @@ func (i *Ingestor) processAlternativeRIPEData(ctx context.Context, data map[stri
 						continue
 					}
 
-					prefix := &model.Prefix{
-						ID:              uuid.New().String(),
-						CIDR:            prefixStr,
-						ASNID:           asn.ID,
-						MaxLength:       maxLen,
-						ValidationState: "UNKNOWN",
-						CreatedAt:       time.Now(),
-						UpdatedAt:       time.Now(),
-					}
-
-					// Insert Prefix
-					if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-						fmt.Printf("Error inserting prefix %s: %v\n", prefixStr, err)
+					// Get or create Prefix
+					prefix, err := i.dbClient.GetPrefixByCIDR(ctx, prefixStr)
+					if err != nil {
+						fmt.Printf("Error getting prefix %s: %v\n", prefixStr, err)
 						continue
+					}
+					if prefix == nil {
+						prefix = &model.Prefix{
+							ID:              uuid.New().String(),
+							CIDR:            prefixStr,
+							ASNID:           asn.ID,
+							MaxLength:       maxLen,
+							ValidationState: "UNKNOWN",
+							CreatedAt:       time.Now(),
+							UpdatedAt:       time.Now(),
+						}
+						if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
+							fmt.Printf("Error inserting prefix %s: %v\n", prefixStr, err)
+							continue
+						}
 					}
 
 					// Get trust anchor

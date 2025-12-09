@@ -696,9 +696,9 @@ func (i *Ingestor) IngestFromAllSources(ctx context.Context) error {
 	}
 
 	sources := []func(context.Context) error{
-		i.IngestFromRIPE,
+		// i.IngestFromRIPE,
 		i.IngestFromCloudflare,
-		i.IngestFromRoutinator,
+		// i.IngestFromRoutinator,
 	}
 
 	for _, source := range sources {

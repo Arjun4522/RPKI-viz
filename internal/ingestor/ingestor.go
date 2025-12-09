@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type Ingestor struct {
 	httpClient   *http.Client
 	dbClient     interface {
 		GetOrCreateASN(ctx context.Context, number int, name, country string) (*model.ASN, error)
+		GetASNByID(ctx context.Context, id string) (*model.ASN, error)
 		GetOrCreateTrustAnchor(ctx context.Context, name, uri, rsaKey, sha256 string) (*model.TrustAnchor, error)
 		GetPrefixByCIDR(ctx context.Context, cidr string) (*model.Prefix, error)
 		InsertPrefix(ctx context.Context, prefix *model.Prefix) error
@@ -38,16 +40,20 @@ type Ingestor struct {
 // NewIngestor creates a new ingestor
 func NewIngestor(dbClient interface {
 	GetOrCreateASN(ctx context.Context, number int, name, country string) (*model.ASN, error)
+	GetASNByID(ctx context.Context, id string) (*model.ASN, error)
 	GetOrCreateTrustAnchor(ctx context.Context, name, uri, rsaKey, sha256 string) (*model.TrustAnchor, error)
 	GetPrefixByCIDR(ctx context.Context, cidr string) (*model.Prefix, error)
 	InsertPrefix(ctx context.Context, prefix *model.Prefix) error
 	InsertROA(ctx context.Context, roa *model.ROA) error
 	InsertVRP(ctx context.Context, vrp *model.VRP) error
 }) *Ingestor {
+	roaProc := service.NewROAProcessor()
+	roaProc.SetDBClient(dbClient)
+
 	return &Ingestor{
 		rrdpClient:   rrdp.NewClient(),
 		rsyncClient:  rsync.NewClient(),
-		roaProcessor: service.NewROAProcessor(),
+		roaProcessor: roaProc,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -246,13 +252,19 @@ func (i *Ingestor) ingestFromRIPERRDP(ctx context.Context) error {
 
 		fmt.Printf("Fetched snapshot with %d publishes\n", len(snapshot.Publishes))
 
-		// Process snapshot data to extract ROAs
 		for _, publish := range snapshot.Publishes {
 			if strings.HasSuffix(publish.URI, ".roa") {
-				// Decode base64 data from RRDP
-				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				// Decode base64 data from RRDP (clean whitespace first)
+				cleanData := strings.Map(func(r rune) rune {
+					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+						return r
+					}
+					return -1
+				}, publish.Data)
+				decodedData, err := base64.StdEncoding.DecodeString(cleanData)
 				if err != nil {
-					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					// Skip invalid base64 data (some RIRs may have encoding issues)
+					fmt.Printf("Skipping ROA %s due to base64 decoding error: %v\n", publish.URI, err)
 					continue
 				}
 
@@ -263,11 +275,26 @@ func (i *Ingestor) ingestFromRIPERRDP(ctx context.Context) error {
 					continue
 				}
 
-				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(ctx, decodedData, ta)
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
 				}
+
+				// Insert VRPs into database, ensuring ASN IDs are valid
+				for _, vrp := range vrps {
+					// Verify the ASN exists before inserting VRP
+					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
+					if err != nil || existingASN == nil {
+						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
+						continue
+					}
+
+					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
+						fmt.Printf("Error inserting VRP: %v\n", err)
+					}
+				}
+
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -310,10 +337,17 @@ func (i *Ingestor) ingestFromAFRINICRRDP(ctx context.Context) error {
 
 		for _, publish := range snapshot.Publishes {
 			if strings.HasSuffix(publish.URI, ".roa") {
-				// Decode base64 data from RRDP
-				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				// Decode base64 data from RRDP (clean whitespace first)
+				cleanData := strings.Map(func(r rune) rune {
+					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+						return r
+					}
+					return -1
+				}, publish.Data)
+				decodedData, err := base64.StdEncoding.DecodeString(cleanData)
 				if err != nil {
-					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					// Skip invalid base64 data (some RIRs may have encoding issues)
+					fmt.Printf("Skipping ROA %s due to base64 decoding error: %v\n", publish.URI, err)
 					continue
 				}
 
@@ -324,11 +358,26 @@ func (i *Ingestor) ingestFromAFRINICRRDP(ctx context.Context) error {
 					continue
 				}
 
-				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(ctx, decodedData, ta)
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
 				}
+
+				// Insert VRPs into database, ensuring ASN IDs are valid
+				for _, vrp := range vrps {
+					// Verify the ASN exists before inserting VRP
+					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
+					if err != nil || existingASN == nil {
+						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
+						continue
+					}
+
+					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
+						fmt.Printf("Error inserting VRP: %v\n", err)
+					}
+				}
+
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -371,10 +420,17 @@ func (i *Ingestor) ingestFromAPNICRRDP(ctx context.Context) error {
 
 		for _, publish := range snapshot.Publishes {
 			if strings.HasSuffix(publish.URI, ".roa") {
-				// Decode base64 data from RRDP
-				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				// Decode base64 data from RRDP (clean whitespace first)
+				cleanData := strings.Map(func(r rune) rune {
+					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+						return r
+					}
+					return -1
+				}, publish.Data)
+				decodedData, err := base64.StdEncoding.DecodeString(cleanData)
 				if err != nil {
-					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					// Skip invalid base64 data (some RIRs may have encoding issues)
+					fmt.Printf("Skipping ROA %s due to base64 decoding error: %v\n", publish.URI, err)
 					continue
 				}
 
@@ -385,11 +441,26 @@ func (i *Ingestor) ingestFromAPNICRRDP(ctx context.Context) error {
 					continue
 				}
 
-				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(ctx, decodedData, ta)
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
 				}
+
+				// Insert VRPs into database, ensuring ASN IDs are valid
+				for _, vrp := range vrps {
+					// Verify the ASN exists before inserting VRP
+					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
+					if err != nil || existingASN == nil {
+						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
+						continue
+					}
+
+					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
+						fmt.Printf("Error inserting VRP: %v\n", err)
+					}
+				}
+
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -432,10 +503,17 @@ func (i *Ingestor) ingestFromARINRRDP(ctx context.Context) error {
 
 		for _, publish := range snapshot.Publishes {
 			if strings.HasSuffix(publish.URI, ".roa") {
-				// Decode base64 data from RRDP
-				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				// Decode base64 data from RRDP (clean whitespace first)
+				cleanData := strings.Map(func(r rune) rune {
+					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+						return r
+					}
+					return -1
+				}, publish.Data)
+				decodedData, err := base64.StdEncoding.DecodeString(cleanData)
 				if err != nil {
-					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					// Skip invalid base64 data (some RIRs may have encoding issues)
+					fmt.Printf("Skipping ROA %s due to base64 decoding error: %v\n", publish.URI, err)
 					continue
 				}
 
@@ -446,11 +524,26 @@ func (i *Ingestor) ingestFromARINRRDP(ctx context.Context) error {
 					continue
 				}
 
-				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(ctx, decodedData, ta)
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
 				}
+
+				// Insert VRPs into database, ensuring ASN IDs are valid
+				for _, vrp := range vrps {
+					// Verify the ASN exists before inserting VRP
+					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
+					if err != nil || existingASN == nil {
+						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
+						continue
+					}
+
+					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
+						fmt.Printf("Error inserting VRP: %v\n", err)
+					}
+				}
+
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -493,10 +586,17 @@ func (i *Ingestor) ingestFromLACNICRRDP(ctx context.Context) error {
 
 		for _, publish := range snapshot.Publishes {
 			if strings.HasSuffix(publish.URI, ".roa") {
-				// Decode base64 data from RRDP
-				decodedData, err := base64.StdEncoding.DecodeString(publish.Data)
+				// Decode base64 data from RRDP (clean whitespace first)
+				cleanData := strings.Map(func(r rune) rune {
+					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+						return r
+					}
+					return -1
+				}, publish.Data)
+				decodedData, err := base64.StdEncoding.DecodeString(cleanData)
 				if err != nil {
-					fmt.Printf("Error decoding base64 data for ROA %s: %v\n", publish.URI, err)
+					// Skip invalid base64 data (some RIRs may have encoding issues)
+					fmt.Printf("Skipping ROA %s due to base64 decoding error: %v\n", publish.URI, err)
 					continue
 				}
 
@@ -507,11 +607,26 @@ func (i *Ingestor) ingestFromLACNICRRDP(ctx context.Context) error {
 					continue
 				}
 
-				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(decodedData, ta)
+				vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(ctx, decodedData, ta)
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
 				}
+
+				// Insert VRPs into database, ensuring ASN IDs are valid
+				for _, vrp := range vrps {
+					// Verify the ASN exists before inserting VRP
+					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
+					if err != nil || existingASN == nil {
+						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
+						continue
+					}
+
+					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
+						fmt.Printf("Error inserting VRP: %v\n", err)
+					}
+				}
+
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -728,10 +843,10 @@ func (i *Ingestor) processRIPEData(ctx context.Context, rawData []byte) ([]*mode
 			}
 		}
 
-		// Get trust anchor
+		// Get RIPE trust anchor
 		ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, "RIPE NCC", "rsync://rpki.ripe.net/repository/", "", "")
 		if err != nil {
-			fmt.Printf("Error getting trust anchor for RIPE: %v\n", err)
+			fmt.Printf("Error getting RIPE trust anchor: %v\n", err)
 			continue
 		}
 
@@ -883,27 +998,55 @@ func (i *Ingestor) processAlternativeRIPEData(ctx context.Context, data map[stri
 	return roas, vrps, nil
 }
 
-// IngestFromAllSources ingests from all configured sources
+// IngestFromAllSources ingests from all configured sources concurrently
 func (i *Ingestor) IngestFromAllSources(ctx context.Context) error {
 	// Ensure trust anchors exist
 	if err := i.ensureTrustAnchors(ctx); err != nil {
 		return fmt.Errorf("failed to ensure trust anchors: %w", err)
 	}
 
-	sources := []func(context.Context) error{
-		i.IngestFromRIPE,
-		i.IngestFromAFRINIC,
-		i.IngestFromAPNIC,
-		i.IngestFromARIN,
-		i.IngestFromLACNIC,
-		i.IngestFromCloudflare,
+	sources := []struct {
+		name string
+		fn   func(context.Context) error
+	}{
+		{"RIPE", i.IngestFromRIPE},
+		{"AFRINIC", i.IngestFromAFRINIC},
+		{"APNIC", i.IngestFromAPNIC},
+		{"ARIN", i.IngestFromARIN},
+		{"LACNIC", i.IngestFromLACNIC},
+		{"Cloudflare", i.IngestFromCloudflare},
 	}
 
+	// Use goroutines for concurrent processing
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(sources))
+
 	for _, source := range sources {
-		if err := source(ctx); err != nil {
-			// Log error but continue with other sources
-			fmt.Printf("Error ingesting from source: %v\n", err)
-		}
+		wg.Add(1)
+		go func(name string, fn func(context.Context) error) {
+			defer wg.Done()
+			fmt.Printf("Starting ingestion from %s...\n", name)
+			if err := fn(ctx); err != nil {
+				fmt.Printf("Error ingesting from %s: %v\n", name, err)
+				errChan <- fmt.Errorf("%s: %w", name, err)
+			} else {
+				fmt.Printf("Completed ingestion from %s\n", name)
+			}
+		}(source.name, source.fn)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	close(errChan)
+
+	// Collect any errors
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("ingestion completed with errors: %v", errors)
 	}
 
 	return nil

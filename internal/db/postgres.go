@@ -878,9 +878,10 @@ func (c *PostgresClient) GetOrCreateTrustAnchor(ctx context.Context, name, uri, 
 
 	err = c.InsertTrustAnchor(ctx, ta)
 	if err != nil {
-		return nil, fmt.Errorf("failed to insert new trust anchor: %w", err)
+		return nil, fmt.Errorf("failed to insert new trust anchor %q: %w", name, err)
 	}
 
+	fmt.Printf("DEBUG: Created trust anchor %q (ID: %s)\n", ta.Name, ta.ID)
 	return ta, nil
 }
 
@@ -1018,9 +1019,21 @@ func (c *PostgresClient) GetOrCreateASN(ctx context.Context, number int, name, c
 		UpdatedAt: time.Now(),
 	}
 
+	// Try to insert, ignore conflicts
 	err = c.InsertASN(ctx, asn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to insert new ASN: %w", err)
+		// If insert failed, it might be due to conflict - try to get existing again
+		existing, err := c.GetASNByNumber(ctx, number)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get ASN after insert attempt: %w", err)
+		}
+		if existing != nil {
+			fmt.Printf("DEBUG: Found existing trust anchor %q (ID: %s) for request %q\n", existing.Name, existing.ID, name)
+			return existing, nil
+		}
+
+		fmt.Printf("DEBUG: Creating new trust anchor %q\n", name)
+		return nil, fmt.Errorf("failed to create or retrieve ASN: %w", err)
 	}
 
 	return asn, nil

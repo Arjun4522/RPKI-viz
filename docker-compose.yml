@@ -7,7 +7,7 @@ services:
       - SERVER_ADDR=:8080
       - DATABASE_URL=postgres://rpki_user:rpki_password@db:5432/rpki_viz?sslmode=disable
       - REDIS_URL=redis://redis:6379
-      - INGESTION_INTERVAL=1m
+      - INGESTION_INTERVAL=2m
       - LOG_LEVEL=info
     depends_on:
       - db
@@ -21,6 +21,12 @@ services:
       timeout: 3s
       retries: 3
       start_period: 40s
+    # Fix networking issues
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - rpki-net
 
   db:
     image: postgres:15-alpine
@@ -39,6 +45,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - rpki-net
 
   redis:
     image: redis:7-alpine
@@ -52,6 +60,12 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+    networks:
+      - rpki-net
+
+networks:
+  rpki-net:
+    driver: bridge
 
 volumes:
   postgres_data:

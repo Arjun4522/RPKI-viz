@@ -32,5 +32,3 @@ Thumbs.db
 *.tmp
 *.swp
 
-# Project specific
-rpki-viz

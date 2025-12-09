@@ -256,7 +256,13 @@ func (r *queryResolver) Prefixes(ctx context.Context, first *int, offset *int, o
 			fm["cidr"] = *filter.Cidr
 		}
 		if filter.Asn != nil {
-			fm["asn"] = *filter.Asn
+			asn, err := r.postgresClient.GetASNByNumber(ctx, *filter.Asn)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get ASN: %w", err)
+			}
+			if asn != nil {
+				fm["asnId"] = asn.ID
+			}
 		}
 		if filter.ValidationState != nil {
 			fm["validationState"] = string(*filter.ValidationState)
@@ -399,10 +405,22 @@ func (r *queryResolver) Vrps(ctx context.Context, first *int, offset *int, order
 	if filter != nil {
 		fm := make(map[string]interface{})
 		if filter.Asn != nil {
-			fm["asn"] = *filter.Asn
+			asn, err := r.postgresClient.GetASNByNumber(ctx, *filter.Asn)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get ASN: %w", err)
+			}
+			if asn != nil {
+				fm["asnId"] = asn.ID
+			}
 		}
 		if filter.Prefix != nil {
-			fm["prefix"] = *filter.Prefix
+			prefix, err := r.postgresClient.GetPrefixByCIDR(ctx, *filter.Prefix)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get prefix: %w", err)
+			}
+			if prefix != nil {
+				fm["prefixId"] = prefix.ID
+			}
 		}
 		filterMap = fm
 	}

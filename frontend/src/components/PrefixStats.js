@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useQuery, gql } from '@apollo/client';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 const PREFIX_STATS_QUERY = gql`
-  query GetPrefixStats {
-    prefixes(first: 1000, orderBy: { field: CIDR, direction: ASC }) {
+  query GetPrefixStats($first: Int, $offset: Int) {
+    prefixes(first: $first, offset: $offset, orderBy: { field: CIDR, direction: ASC }) {
       edges {
         node {
           id
@@ -17,6 +17,10 @@ const PREFIX_STATS_QUERY = gql`
           maxLength
         }
       }
+      pageInfo {
+        hasNextPage
+      }
+      totalCount
     }
     globalSummary {
       validPrefixes
@@ -27,12 +31,23 @@ const PREFIX_STATS_QUERY = gql`
 `;
 
 function PrefixStats() {
-  const { loading, error, data } = useQuery(PREFIX_STATS_QUERY);
+  const [page, setPage] = useState(0);
+  const pageSize = 10;
+  const { loading, error, data } = useQuery(PREFIX_STATS_QUERY, {
+    variables: { first: pageSize, offset: page * pageSize },
+  });
+
+  const totalPages = data ? Math.ceil(data.prefixes.totalCount / pageSize) : 0;
+
+  const goToPage = (newPage) => {
+    setPage(newPage);
+  };
 
   if (loading) return <p>Loading prefix statistics...</p>;
   if (error) return <p>Error: {error.message}</p>;
 
   const prefixes = data.prefixes.edges.map(edge => edge.node);
+  const totalPrefixes = data.prefixes.totalCount;
   const summary = data.globalSummary;
 
   // Validation state distribution
@@ -143,35 +158,44 @@ function PrefixStats() {
         </ResponsiveContainer>
       </div>
 
-      <div className="table-container">
-        <h3>Prefix List (First 1000)</h3>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>CIDR</th>
-              <th>ASN</th>
-              <th>ASN Name</th>
-              <th>Validation State</th>
-              <th>Max Length</th>
-            </tr>
-          </thead>
-          <tbody>
-            {prefixes.slice(0, 100).map(prefix => (
-              <tr key={prefix.id}>
-                <td>{prefix.cidr}</td>
-                <td>{prefix.asn?.number || 'N/A'}</td>
-                <td>{prefix.asn?.name || 'N/A'}</td>
-                <td>
-                  <span className={`status-${prefix.validationState.toLowerCase()}`}>
-                    {prefix.validationState}
-                  </span>
-                </td>
-                <td>{prefix.maxLength || 'Not Set'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+       <div className="table-container">
+         <h3>Prefix List ({totalPrefixes})</h3>
+         <table className="data-table">
+           <thead>
+             <tr>
+               <th>CIDR</th>
+               <th>ASN</th>
+               <th>ASN Name</th>
+               <th>Validation State</th>
+               <th>Max Length</th>
+             </tr>
+           </thead>
+           <tbody>
+             {prefixes.map(prefix => (
+               <tr key={prefix.id}>
+                 <td>{prefix.cidr}</td>
+                 <td>{prefix.asn?.number || 'N/A'}</td>
+                 <td>{prefix.asn?.name || 'N/A'}</td>
+                 <td>
+                   <span className={`status-${prefix.validationState.toLowerCase()}`}>
+                     {prefix.validationState}
+                   </span>
+                 </td>
+                 <td>{prefix.maxLength || 'Not Set'}</td>
+               </tr>
+             ))}
+           </tbody>
+         </table>
+         <div className="pagination">
+           <button onClick={() => goToPage(page - 1)} disabled={page === 0}>
+             Previous
+           </button>
+           <span>Page {page + 1} of {totalPages}</span>
+           <button onClick={() => goToPage(page + 1)} disabled={!data.prefixes.pageInfo.hasNextPage}>
+             Next
+           </button>
+         </div>
+       </div>
     </div>
   );
 }

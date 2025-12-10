@@ -159,7 +159,19 @@ func (r *prefixResolver) ValidationState(ctx context.Context, obj *model.Prefix)
 
 // MaxLength is the resolver for the maxLength field.
 func (r *prefixResolver) MaxLength(ctx context.Context, obj *model.Prefix) (*int, error) {
-	panic(fmt.Errorf("not implemented: MaxLength - maxLength"))
+	if obj.MaxLength.Valid {
+		val := int(obj.MaxLength.Int64)
+		return &val, nil
+	}
+	return nil, nil
+}
+
+// ExpiresAt is the resolver for the expiresAt field.
+func (r *prefixResolver) ExpiresAt(ctx context.Context, obj *model.Prefix) (*time.Time, error) {
+	if obj.ExpiresAt.Valid {
+		return &obj.ExpiresAt.Time, nil
+	}
+	return nil, nil
 }
 
 // Asn is the resolver for the asn field.

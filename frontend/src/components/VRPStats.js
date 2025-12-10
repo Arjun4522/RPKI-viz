@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useQuery, gql } from '@apollo/client';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 const VRP_STATS_QUERY = gql`
-  query GetVRPStats {
-    vrps(first: 1000, orderBy: { field: CREATED_AT, direction: DESC }) {
+  query GetVRPStats($first: Int, $offset: Int) {
+    vrps(first: $first, offset: $offset, orderBy: { field: CREATED_AT, direction: DESC }) {
       edges {
         node {
           id
@@ -26,6 +26,10 @@ const VRP_STATS_QUERY = gql`
           createdAt
         }
       }
+      pageInfo {
+        hasNextPage
+      }
+      totalCount
     }
     globalSummary {
       totalVRPs
@@ -34,12 +38,23 @@ const VRP_STATS_QUERY = gql`
 `;
 
 function VRPStats() {
-  const { loading, error, data } = useQuery(VRP_STATS_QUERY);
+  const [page, setPage] = useState(0);
+  const pageSize = 10;
+  const { loading, error, data } = useQuery(VRP_STATS_QUERY, {
+    variables: { first: pageSize, offset: page * pageSize },
+  });
+
+  const totalPages = data ? Math.ceil(data.vrps.totalCount / pageSize) : 0;
+
+  const goToPage = (newPage) => {
+    setPage(newPage);
+  };
 
   if (loading) return <p>Loading VRP statistics...</p>;
   if (error) return <p>Error: {error.message}</p>;
 
   const vrps = data.vrps.edges.map(edge => edge.node);
+  const totalVRPs = data.vrps.totalCount;
 
   // Max length distribution
   const maxLengthStats = {};
@@ -199,45 +214,54 @@ function VRPStats() {
         </div>
       </div>
 
-      <div className="table-container">
-        <h3>Recent VRPs (Last 100)</h3>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>ASN</th>
-              <th>Prefix</th>
-              <th>Max Length</th>
-              <th>Valid From</th>
-              <th>Valid To</th>
-              <th>Has ROA</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {vrps.slice(0, 100).map(vrp => {
-              const notBefore = new Date(vrp.validity?.notBefore);
-              const notAfter = new Date(vrp.validity?.notAfter);
-              const isValid = now >= notBefore && now <= notAfter;
+       <div className="table-container">
+         <h3>VRPs ({totalVRPs})</h3>
+         <table className="data-table">
+           <thead>
+             <tr>
+               <th>ASN</th>
+               <th>Prefix</th>
+               <th>Max Length</th>
+               <th>Valid From</th>
+               <th>Valid To</th>
+               <th>Has ROA</th>
+               <th>Status</th>
+             </tr>
+           </thead>
+           <tbody>
+             {vrps.map(vrp => {
+               const notBefore = new Date(vrp.validity?.notBefore);
+               const notAfter = new Date(vrp.validity?.notAfter);
+               const isValid = now >= notBefore && now <= notAfter;
 
-              return (
-                <tr key={vrp.id}>
-                  <td>{vrp.asn?.number || 'N/A'}</td>
-                  <td>{vrp.prefix?.cidr || 'N/A'}</td>
-                  <td>{vrp.maxLength || 'N/A'}</td>
-                  <td>{notBefore.toLocaleDateString()}</td>
-                  <td>{notAfter.toLocaleDateString()}</td>
-                  <td>{vrp.roa ? 'Yes' : 'No'}</td>
-                  <td>
-                    <span className={isValid ? 'status-valid' : 'status-invalid'}>
-                      {isValid ? 'Valid' : 'Invalid'}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+               return (
+                 <tr key={vrp.id}>
+                   <td>{vrp.asn?.number || 'N/A'}</td>
+                   <td>{vrp.prefix?.cidr || 'N/A'}</td>
+                   <td>{vrp.maxLength || 'N/A'}</td>
+                   <td>{notBefore.toLocaleDateString()}</td>
+                   <td>{notAfter.toLocaleDateString()}</td>
+                   <td>{vrp.roa ? 'Yes' : 'No'}</td>
+                   <td>
+                     <span className={isValid ? 'status-valid' : 'status-invalid'}>
+                       {isValid ? 'Valid' : 'Invalid'}
+                     </span>
+                   </td>
+                 </tr>
+               );
+             })}
+           </tbody>
+         </table>
+         <div className="pagination">
+           <button onClick={() => goToPage(page - 1)} disabled={page === 0}>
+             Previous
+           </button>
+           <span>Page {page + 1} of {totalPages}</span>
+           <button onClick={() => goToPage(page + 1)} disabled={!data.vrps.pageInfo.hasNextPage}>
+             Next
+           </button>
+         </div>
+       </div>
     </div>
   );
 }

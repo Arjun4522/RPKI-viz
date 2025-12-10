@@ -22,32 +22,19 @@ const ASNS_QUERY = gql`
 `;
 
 function ASNList() {
-  const [offset, setOffset] = useState(0);
-  const { loading, error, data, fetchMore } = useQuery(ASNS_QUERY, {
-    variables: { first: 20, offset: 0 },
+  const [page, setPage] = useState(0);
+  const pageSize = 10;
+  const { loading, error, data } = useQuery(ASNS_QUERY, {
+    variables: { first: pageSize, offset: page * pageSize },
   });
 
-  const loadMore = () => {
-    fetchMore({
-      variables: {
-        offset: offset + 20,
-      },
-      updateQuery: (prev, { fetchMoreResult }) => {
-        if (!fetchMoreResult) return prev;
-        return {
-          ...prev,
-          asns: {
-            ...prev.asns,
-            edges: [...prev.asns.edges, ...fetchMoreResult.asns.edges],
-            pageInfo: fetchMoreResult.asns.pageInfo,
-          },
-        };
-      },
-    });
-    setOffset(offset + 20);
+  const totalPages = data ? Math.ceil(data.asns.totalCount / pageSize) : 0;
+
+  const goToPage = (newPage) => {
+    setPage(newPage);
   };
 
-  if (loading && !data) return <p>Loading ASNs...</p>;
+  if (loading) return <p>Loading ASNs...</p>;
   if (error) return <p>Error: {error.message}</p>;
 
   return (
@@ -73,9 +60,15 @@ function ASNList() {
           ))}
         </tbody>
       </table>
-      {data.asns.pageInfo.hasNextPage && (
-        <button onClick={loadMore}>Load More</button>
-      )}
+      <div className="pagination">
+        <button onClick={() => goToPage(page - 1)} disabled={page === 0}>
+          Previous
+        </button>
+        <span>Page {page + 1} of {totalPages}</span>
+        <button onClick={() => goToPage(page + 1)} disabled={!data.asns.pageInfo.hasNextPage}>
+          Next
+        </button>
+      </div>
     </div>
   );
 }

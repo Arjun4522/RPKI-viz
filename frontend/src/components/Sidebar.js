@@ -9,7 +9,6 @@ function Sidebar({ activeView, onViewChange }) {
     { id: 'roas', label: 'ROA Statistics', icon: '📋' },
     { id: 'vrps', label: 'VRP Statistics', icon: '✅' },
     { id: 'rir', label: 'RIR Statistics', icon: '🌍' },
-    { id: 'validation', label: 'Validation Stats', icon: '🔍' },
   ];
 
   return (

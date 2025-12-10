@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useQuery, gql } from '@apollo/client';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 
 const ROA_STATS_QUERY = gql`
-  query GetROAStats {
-    roas(first: 1000, orderBy: { field: CREATED_AT, direction: DESC }) {
+  query GetROAStats($first: Int, $offset: Int) {
+    roas(first: $first, offset: $offset, orderBy: { field: CREATED_AT, direction: DESC }) {
       edges {
         node {
           id
@@ -26,6 +26,10 @@ const ROA_STATS_QUERY = gql`
           createdAt
         }
       }
+      pageInfo {
+        hasNextPage
+      }
+      totalCount
     }
     globalSummary {
       totalROAs
@@ -34,12 +38,23 @@ const ROA_STATS_QUERY = gql`
 `;
 
 function ROAStats() {
-  const { loading, error, data } = useQuery(ROA_STATS_QUERY);
+  const [page, setPage] = useState(0);
+  const pageSize = 10;
+  const { loading, error, data } = useQuery(ROA_STATS_QUERY, {
+    variables: { first: pageSize, offset: page * pageSize },
+  });
+
+  const totalPages = data ? Math.ceil(data.roas.totalCount / pageSize) : 0;
+
+  const goToPage = (newPage) => {
+    setPage(newPage);
+  };
 
   if (loading) return <p>Loading ROA statistics...</p>;
   if (error) return <p>Error: {error.message}</p>;
 
   const roas = data.roas.edges.map(edge => edge.node);
+  const totalROAs = data.roas.totalCount;
 
   // TAL distribution
   const talStats = {};
@@ -181,45 +196,54 @@ function ROAStats() {
         </div>
       </div>
 
-      <div className="table-container">
-        <h3>Recent ROAs (Last 100)</h3>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>ASN</th>
-              <th>Prefix</th>
-              <th>Max Length</th>
-              <th>TAL</th>
-              <th>Valid From</th>
-              <th>Valid To</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {roas.slice(0, 100).map(roa => {
-              const notBefore = new Date(roa.validity?.notBefore);
-              const notAfter = new Date(roa.validity?.notAfter);
-              const isValid = now >= notBefore && now <= notAfter;
+       <div className="table-container">
+         <h3>ROAs ({totalROAs})</h3>
+         <table className="data-table">
+           <thead>
+             <tr>
+               <th>ASN</th>
+               <th>Prefix</th>
+               <th>Max Length</th>
+               <th>TAL</th>
+               <th>Valid From</th>
+               <th>Valid To</th>
+               <th>Status</th>
+             </tr>
+           </thead>
+           <tbody>
+             {roas.map(roa => {
+               const notBefore = new Date(roa.validity?.notBefore);
+               const notAfter = new Date(roa.validity?.notAfter);
+               const isValid = now >= notBefore && now <= notAfter;
 
-              return (
-                <tr key={roa.id}>
-                  <td>{roa.asn?.number || 'N/A'}</td>
-                  <td>{roa.prefix?.cidr || 'N/A'}</td>
-                  <td>{roa.maxLength || 'N/A'}</td>
-                  <td>{roa.tal?.name || 'N/A'}</td>
-                  <td>{notBefore.toLocaleDateString()}</td>
-                  <td>{notAfter.toLocaleDateString()}</td>
-                  <td>
-                    <span className={isValid ? 'status-valid' : 'status-invalid'}>
-                      {isValid ? 'Valid' : 'Invalid'}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+               return (
+                 <tr key={roa.id}>
+                   <td>{roa.asn?.number || 'N/A'}</td>
+                   <td>{roa.prefix?.cidr || 'N/A'}</td>
+                   <td>{roa.maxLength || 'N/A'}</td>
+                   <td>{roa.tal?.name || 'N/A'}</td>
+                   <td>{notBefore.toLocaleDateString()}</td>
+                   <td>{notAfter.toLocaleDateString()}</td>
+                   <td>
+                     <span className={isValid ? 'status-valid' : 'status-invalid'}>
+                       {isValid ? 'Valid' : 'Invalid'}
+                     </span>
+                   </td>
+                 </tr>
+               );
+             })}
+           </tbody>
+         </table>
+         <div className="pagination">
+           <button onClick={() => goToPage(page - 1)} disabled={page === 0}>
+             Previous
+           </button>
+           <span>Page {page + 1} of {totalPages}</span>
+           <button onClick={() => goToPage(page + 1)} disabled={!data.roas.pageInfo.hasNextPage}>
+             Next
+           </button>
+         </div>
+       </div>
     </div>
   );
 }

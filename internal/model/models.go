@@ -21,7 +21,7 @@ type Prefix struct {
 	CIDR            string        `json:"cidr"`
 	ASNID           string        `json:"asnId"`
 	MaxLength       sql.NullInt64 `json:"maxLength"`
-	ExpiresAt       time.Time     `json:"expiresAt"`
+	ExpiresAt       sql.NullTime  `json:"expiresAt"`
 	ValidationState string        `json:"validationState"`
 	CreatedAt       time.Time     `json:"createdAt"`
 	UpdatedAt       time.Time     `json:"updatedAt"`

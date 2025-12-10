@@ -6,7 +6,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Autonomous System Numbers
 CREATE TABLE asns (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    number INTEGER NOT NULL UNIQUE,
+    number BIGINT NOT NULL UNIQUE,
     name VARCHAR(255),
     country CHAR(2),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),

@@ -7,7 +7,7 @@ services:
       - SERVER_ADDR=:8080
       - DATABASE_URL=postgres://rpki_user:rpki_password@db:5432/rpki_viz?sslmode=disable
       - REDIS_URL=redis://redis:6379
-      - INGESTION_INTERVAL=2m
+      - INGESTION_INTERVAL=30m
       - LOG_LEVEL=info
     depends_on:
       - db

@@ -95,7 +95,10 @@ func (p *ROAProcessor) ExtractVRPsFromROAFile(ctx context.Context, roaData []byt
 
 	roaInfo, err := p.parseROAFile(roaData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse ROA file: %w", err)
+		// Skip ROAs that cannot be parsed even with lenient validation
+		// These are typically AFRINIC ROAs with broken CMS signatures
+		fmt.Printf("Skipping unparseable ROA: %v\n", err)
+		return []*model.VRP{}, nil
 	}
 
 	var vrps []*model.VRP

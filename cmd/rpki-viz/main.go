@@ -14,6 +14,7 @@ import (
 	"github.com/rpki-viz/backend/internal/db"
 	"github.com/rpki-viz/backend/internal/graphql"
 	"github.com/rpki-viz/backend/internal/ingestor"
+	"github.com/rpki-viz/backend/internal/validator"
 )
 
 func main() {
@@ -43,6 +44,9 @@ func main() {
 	// Initialize ingestor
 	ing := ingestor.NewIngestor(postgresClient)
 
+	// Initialize prefix validator
+	prefixValidator := validator.NewPrefixValidator()
+
 	// Start background ingestion
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,7 +73,7 @@ func main() {
 	// Start HTTP server
 	srv := &http.Server{
 		Addr:    cfg.ServerAddr,
-		Handler: setupRoutes(resolver, postgresClient),
+		Handler: setupRoutes(resolver, postgresClient, prefixValidator),
 	}
 
 	// Start server in a goroutine
@@ -97,7 +101,36 @@ func main() {
 	log.Println("Server exited")
 }
 
-func setupRoutes(resolver *graphql.Resolver, postgresClient *db.PostgresClient) http.Handler {
+func validateAllPrefixes(pg *db.PostgresClient, pv *validator.PrefixValidator) {
+	ctx := context.Background()
+	prefixes, err := pg.GetAllPrefixes(ctx)
+	if err != nil {
+		log.Printf("Failed to get all prefixes: %v", err)
+		return
+	}
+	log.Printf("Starting bulk validation of %d prefixes", len(prefixes))
+	for i, p := range prefixes {
+		if i%1000 == 0 {
+			log.Printf("Validated %d/%d prefixes", i, len(prefixes))
+		}
+		asn, err := pg.GetASNByID(ctx, p.ASNID)
+		if err != nil || asn == nil {
+			continue
+		}
+		vrps, err := pg.GetVRPsByASN(ctx, p.ASNID)
+		if err != nil {
+			continue
+		}
+		result := pv.ValidatePrefix(asn.Number, p.CIDR, vrps)
+		err = pg.UpdatePrefixValidationState(ctx, p.ID, result.State)
+		if err != nil {
+			log.Printf("Failed to update prefix %s: %v", p.ID, err)
+		}
+	}
+	log.Println("Bulk validation completed")
+}
+
+func setupRoutes(resolver *graphql.Resolver, postgresClient *db.PostgresClient, prefixValidator *validator.PrefixValidator) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check endpoint
@@ -132,6 +165,13 @@ func setupRoutes(resolver *graphql.Resolver, postgresClient *db.PostgresClient) 
 	// GraphQL playground for development
 	mux.HandleFunc("/playground", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/graphql", http.StatusFound)
+	})
+
+	// Bulk validation endpoint
+	mux.HandleFunc("/validate-all", func(w http.ResponseWriter, r *http.Request) {
+		go validateAllPrefixes(postgresClient, prefixValidator)
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte("Bulk validation started in background"))
 	})
 
 	return mux

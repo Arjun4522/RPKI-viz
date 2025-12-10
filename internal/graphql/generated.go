@@ -252,6 +252,7 @@ type PrefixResolver interface {
 	Roa(ctx context.Context, obj *model.Prefix) (*model.ROA, error)
 	Vrp(ctx context.Context, obj *model.Prefix) (*model.VRP, error)
 	ValidationState(ctx context.Context, obj *model.Prefix) (model.ValidationState, error)
+	MaxLength(ctx context.Context, obj *model.Prefix) (*int, error)
 }
 type QueryResolver interface {
 	Asn(ctx context.Context, number int) (*model.ASN, error)
@@ -2982,10 +2983,10 @@ func (ec *executionContext) _Prefix_maxLength(ctx context.Context, field graphql
 		field,
 		ec.fieldContext_Prefix_maxLength,
 		func(ctx context.Context) (any, error) {
-			return obj.MaxLength, nil
+			return ec.resolvers.Prefix().MaxLength(ctx, obj)
 		},
 		nil,
-		ec.marshalOInt2int,
+		ec.marshalOInt2ᚖint,
 		true,
 		false,
 	)
@@ -2995,8 +2996,8 @@ func (ec *executionContext) fieldContext_Prefix_maxLength(_ context.Context, fie
 	fc = &graphql.FieldContext{
 		Object:     "Prefix",
 		Field:      field,
-		IsMethod:   false,
-		IsResolver: false,
+		IsMethod:   true,
+		IsResolver: true,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Int does not have child fields")
 		},
@@ -8356,7 +8357,38 @@ func (ec *executionContext) _Prefix(ctx context.Context, sel ast.SelectionSet, o
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "maxLength":
-			out.Values[i] = ec._Prefix_maxLength(ctx, field, obj)
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Prefix_maxLength(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "expiresAt":
 			out.Values[i] = ec._Prefix_expiresAt(ctx, field, obj)
 		case "createdAt":
@@ -11276,18 +11308,6 @@ func (ec *executionContext) marshalOID2ᚖstring(ctx context.Context, sel ast.Se
 	_ = sel
 	_ = ctx
 	res := graphql.MarshalID(*v)
-	return res
-}
-
-func (ec *executionContext) unmarshalOInt2int(ctx context.Context, v any) (int, error) {
-	res, err := graphql.UnmarshalInt(v)
-	return res, graphql.ErrorOnPath(ctx, err)
-}
-
-func (ec *executionContext) marshalOInt2int(ctx context.Context, sel ast.SelectionSet, v int) graphql.Marshaler {
-	_ = sel
-	_ = ctx
-	res := graphql.MarshalInt(v)
 	return res
 }
 

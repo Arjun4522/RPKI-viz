@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -122,7 +123,7 @@ func (p *ROAProcessor) ExtractVRPsFromROAFile(ctx context.Context, roaData []byt
 				ID:              uuid.New().String(),
 				CIDR:            prefixInfo.Prefix,
 				ASNID:           asn.ID,
-				MaxLength:       prefixInfo.MaxLength,
+				MaxLength:       sql.NullInt64{Int64: int64(prefixInfo.MaxLength), Valid: true},
 				ValidationState: "UNKNOWN",
 				CreatedAt:       time.Now(),
 				UpdatedAt:       time.Now(),

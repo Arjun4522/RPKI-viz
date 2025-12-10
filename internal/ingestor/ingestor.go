@@ -2,6 +2,7 @@ package ingestor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -717,7 +718,7 @@ func (i *Ingestor) processCloudflareData(ctx context.Context, rawData []byte) ([
 				ID:              uuid.New().String(),
 				CIDR:            cfRoa.Prefix,
 				ASNID:           asn.ID,
-				MaxLength:       cfRoa.MaxLength,
+				MaxLength:       sql.NullInt64{Int64: int64(cfRoa.MaxLength), Valid: true},
 				ValidationState: "UNKNOWN",
 				CreatedAt:       time.Now(),
 				UpdatedAt:       time.Now(),
@@ -832,7 +833,7 @@ func (i *Ingestor) processRIPEData(ctx context.Context, rawData []byte) ([]*mode
 				ID:              uuid.New().String(),
 				CIDR:            validation.Prefix,
 				ASNID:           asn.ID,
-				MaxLength:       validation.MaxLength,
+				MaxLength:       sql.NullInt64{Int64: int64(validation.MaxLength), Valid: true},
 				ValidationState: "UNKNOWN",
 				CreatedAt:       time.Now(),
 				UpdatedAt:       time.Now(),
@@ -938,7 +939,7 @@ func (i *Ingestor) processAlternativeRIPEData(ctx context.Context, data map[stri
 							ID:              uuid.New().String(),
 							CIDR:            prefixStr,
 							ASNID:           asn.ID,
-							MaxLength:       maxLen,
+							MaxLength:       sql.NullInt64{Int64: int64(maxLen), Valid: true},
 							ValidationState: "UNKNOWN",
 							CreatedAt:       time.Now(),
 							UpdatedAt:       time.Now(),

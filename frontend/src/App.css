@@ -1,5 +1,12 @@
 .App {
+  display: flex;
   text-align: center;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  margin-left: 250px;
 }
 
 .App-header {
@@ -14,4 +21,11 @@
 
 main {
   padding: 20px;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .main-content {
+    margin-left: 0;
+  }
 }

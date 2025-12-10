@@ -1,6 +1,7 @@
 package model
 
 import (
+	"database/sql"
 	"time"
 )
 
@@ -16,14 +17,14 @@ type ASN struct {
 
 // Prefix represents an IP prefix in CIDR notation
 type Prefix struct {
-	ID              string    `json:"id"`
-	CIDR            string    `json:"cidr"`
-	ASNID           string    `json:"asnId"`
-	MaxLength       int       `json:"maxLength"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-	ValidationState string    `json:"validationState"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID              string        `json:"id"`
+	CIDR            string        `json:"cidr"`
+	ASNID           string        `json:"asnId"`
+	MaxLength       sql.NullInt64 `json:"maxLength"`
+	ExpiresAt       time.Time     `json:"expiresAt"`
+	ValidationState string        `json:"validationState"`
+	CreatedAt       time.Time     `json:"createdAt"`
+	UpdatedAt       time.Time     `json:"updatedAt"`
 }
 
 // TrustAnchor represents a Trust Anchor Locator

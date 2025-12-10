@@ -1,7 +1,6 @@
 import React from 'react';
 import { useQuery, gql } from '@apollo/client';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import ASNList from './ASNList';
 import PrefixValidator from './PrefixValidator';
 import './Dashboard.css';
 
@@ -15,20 +14,6 @@ const GLOBAL_SUMMARY_QUERY = gql`
       validPrefixes
       invalidPrefixes
       notFoundPrefixes
-      validationStats {
-        valid
-        invalid
-        notFound
-        unknown
-      }
-      rirStats {
-        rir
-        totalROAs
-        totalVRPs
-        validPrefixes
-        invalidPrefixes
-        notFoundPrefixes
-      }
     }
   }
 `;
@@ -40,11 +25,11 @@ function Dashboard() {
   if (error) return <p>Error: {error.message}</p>;
 
   const summary = data.globalSummary;
-  const validationData = [
-    { name: 'Valid', value: summary.validationStats.valid },
-    { name: 'Invalid', value: summary.validationStats.invalid },
-    { name: 'Not Found', value: summary.validationStats.notFound },
-    { name: 'Unknown', value: summary.validationStats.unknown },
+  const totalsData = [
+    { name: 'ASNs', value: summary.totalASNs },
+    { name: 'Prefixes', value: summary.totalPrefixes },
+    { name: 'ROAs', value: summary.totalROAs },
+    { name: 'VRPs', value: summary.totalVRPs },
   ];
 
   return (
@@ -69,20 +54,23 @@ function Dashboard() {
         </div>
       </div>
 
-      <h3>Validation Statistics</h3>
-      <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={validationData}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="name" />
-          <YAxis />
-          <Tooltip />
-          <Legend />
-          <Bar dataKey="value" fill="#8884d8" />
-        </BarChart>
-      </ResponsiveContainer>
 
-      <PrefixValidator />
-      <ASNList />
+
+
+
+       <h3>Total Counts</h3>
+       <ResponsiveContainer width="100%" height={300}>
+         <BarChart data={totalsData}>
+           <CartesianGrid strokeDasharray="3 3" />
+           <XAxis dataKey="name" />
+           <YAxis />
+           <Tooltip />
+           <Legend />
+           <Bar dataKey="value" fill="#82ca9d" />
+         </BarChart>
+       </ResponsiveContainer>
+
+        <PrefixValidator />
     </div>
   );
 }

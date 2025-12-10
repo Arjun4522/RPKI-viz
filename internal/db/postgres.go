@@ -589,6 +589,34 @@ func (c *PostgresClient) GetGlobalSummary(ctx context.Context) (*model.GlobalSum
 	return &summary, rows.Err()
 }
 
+// UpdatePrefixValidationState updates the validation state of a prefix
+func (c *PostgresClient) UpdatePrefixValidationState(ctx context.Context, prefixID string, state model.ValidationState) error {
+	query := `UPDATE prefixes SET validation_state = $1, updated_at = NOW() WHERE id = $2`
+	_, err := c.db.ExecContext(ctx, query, string(state), prefixID)
+	return err
+}
+
+// GetAllPrefixes retrieves all prefixes
+func (c *PostgresClient) GetAllPrefixes(ctx context.Context) ([]*model.Prefix, error) {
+	query := `SELECT id, cidr, asn_id, validation_state, max_length, expires_at, created_at, updated_at FROM prefixes`
+	rows, err := c.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var prefixes []*model.Prefix
+	for rows.Next() {
+		var p model.Prefix
+		err := rows.Scan(&p.ID, &p.CIDR, &p.ASNID, &p.ValidationState, &p.MaxLength, &p.ExpiresAt, &p.CreatedAt, &p.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan prefix: %w", err)
+		}
+		prefixes = append(prefixes, &p)
+	}
+	return prefixes, rows.Err()
+}
+
 // GetVRPsByASN retrieves VRPs for a specific ASN
 func (c *PostgresClient) GetVRPsByASN(ctx context.Context, asnID string) ([]*model.VRP, error) {
 	query := `
@@ -1063,6 +1091,7 @@ func (c *PostgresClient) InsertROA(ctx context.Context, roa *model.ROA) error {
 	query := `
 		INSERT INTO roas (id, asn_id, prefix_id, max_length, not_before, not_after, signature, tal_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (asn_id, prefix_id, max_length, tal_id) DO NOTHING
 	`
 
 	_, err := c.db.ExecContext(ctx, query,
@@ -1082,6 +1111,7 @@ func (c *PostgresClient) InsertVRP(ctx context.Context, vrp *model.VRP) error {
 	query := `
 		INSERT INTO vrps (id, asn_id, prefix_id, max_length, not_before, not_after, roa_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (asn_id, prefix_id, max_length) DO NOTHING
 	`
 
 	_, err := c.db.ExecContext(ctx, query,

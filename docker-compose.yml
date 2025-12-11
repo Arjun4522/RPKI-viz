@@ -63,6 +63,16 @@ services:
     networks:
       - rpki-net
 
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
+    networks:
+      - rpki-net
+
 networks:
   rpki-net:
     driver: bridge

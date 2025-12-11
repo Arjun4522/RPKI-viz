@@ -10,7 +10,7 @@ import RIRStats from './components/RIRStats';
 import './App.css';
 
 const client = new ApolloClient({
-  uri: '/graphql',
+  uri: 'http://localhost:8080/graphql',
   cache: new InMemoryCache()
 });
 

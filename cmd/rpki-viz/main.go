@@ -42,7 +42,10 @@ func main() {
 	resolver := graphql.NewResolver(postgresClient, redisClient)
 
 	// Initialize ingestor
-	ing := ingestor.NewIngestor(postgresClient)
+	ing, err := ingestor.NewIngestor(postgresClient)
+	if err != nil {
+		log.Fatalf("Failed to create ingestor: %v", err)
+	}
 
 	// Initialize prefix validator
 	prefixValidator := validator.NewPrefixValidator()

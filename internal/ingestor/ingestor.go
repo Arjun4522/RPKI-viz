@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/rpki-viz/backend/internal/model"
@@ -21,19 +22,220 @@ import (
 	"github.com/rpki-viz/backend/pkg/rsync"
 )
 
+// IngestionCache provides in-memory caching for database lookups
+type IngestionCache struct {
+	asns     sync.Map // map[int]*model.ASN
+	prefixes sync.Map // map[string]*model.Prefix
+	ttl      time.Duration
+}
+
+// WorkerPool manages concurrent task execution with limited workers
+type WorkerPool struct {
+	workers   int
+	taskQueue chan Task
+	wg        sync.WaitGroup
+	ingestor  *Ingestor
+}
+
+// Task represents a unit of work for the worker pool
+type Task struct {
+	Name string
+	Fn   func(context.Context) error
+}
+
+// NewWorkerPool creates a new worker pool with specified number of workers
+func NewWorkerPool(workers int, ingestor *Ingestor) *WorkerPool {
+	return &WorkerPool{
+		workers:   workers,
+		taskQueue: make(chan Task, workers*2), // Buffer for smooth operation
+		ingestor:  ingestor,
+	}
+}
+
+// Start begins processing tasks
+func (wp *WorkerPool) Start(ctx context.Context) {
+	for i := 0; i < wp.workers; i++ {
+		wp.wg.Add(1)
+		go wp.worker(ctx, wp.ingestor)
+	}
+}
+
+// Execute submits tasks and waits for completion
+func (wp *WorkerPool) Execute(ctx context.Context, tasks []Task) error {
+	wp.Start(ctx)
+
+	// Send tasks to workers
+	go func() {
+		defer close(wp.taskQueue)
+		for _, task := range tasks {
+			select {
+			case wp.taskQueue <- task:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Wait for all workers to complete
+	done := make(chan struct{})
+	go func() {
+		wp.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// worker processes tasks from the queue
+func (wp *WorkerPool) worker(ctx context.Context, ingestor *Ingestor) {
+	defer wp.wg.Done()
+	for {
+		select {
+		case task, ok := <-wp.taskQueue:
+			if !ok {
+				return // Channel closed, no more tasks
+			}
+			if err := ingestor.ingestWithRetry(ctx, task.Name, task.Fn); err != nil {
+				fmt.Printf("Final error ingesting from %s: %v\n", task.Name, err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// IngestionConfig holds configuration for ingestion operations
+type IngestionConfig struct {
+	MaxRetries      int
+	RetryBackoff    time.Duration
+	Timeout         time.Duration
+	SkipOnFailure   bool
+	ValidationLevel ValidationLevel
+}
+
+// ValidationLevel represents the strictness of validation
+type ValidationLevel int
+
+const (
+	Strict ValidationLevel = iota
+	Lenient
+	VeryLenient
+)
+
+// CircuitBreakerState represents the state of a circuit breaker
+type CircuitBreakerState int
+
+const (
+	StateClosed CircuitBreakerState = iota
+	StateOpen
+	StateHalfOpen
+)
+
+// CircuitBreaker implements the circuit breaker pattern for TA ingestion
+type CircuitBreaker struct {
+	mu               sync.RWMutex
+	failureThreshold int
+	timeout          time.Duration
+	state            CircuitBreakerState
+	lastFailureTime  time.Time
+	failureCount     int
+	successCount     int
+	nextAttemptTime  time.Time
+}
+
+// NewCircuitBreaker creates a new circuit breaker
+func NewCircuitBreaker(failureThreshold int, timeout time.Duration) *CircuitBreaker {
+	return &CircuitBreaker{
+		failureThreshold: failureThreshold,
+		timeout:          timeout,
+		state:            StateClosed,
+	}
+}
+
+// CanExecute checks if the circuit breaker allows execution
+func (cb *CircuitBreaker) CanExecute() bool {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+
+	switch cb.state {
+	case StateClosed:
+		return true
+	case StateOpen:
+		if time.Now().After(cb.nextAttemptTime) {
+			cb.mu.RUnlock()
+			cb.mu.Lock()
+			cb.state = StateHalfOpen
+			cb.successCount = 0
+			cb.mu.Unlock()
+			cb.mu.RLock()
+			return true
+		}
+		return false
+	case StateHalfOpen:
+		return true
+	default:
+		return false
+	}
+}
+
+// RecordSuccess records a successful execution
+func (cb *CircuitBreaker) RecordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failureCount = 0
+	cb.successCount++
+
+	// If in half-open state and we've had enough successes, close the circuit
+	if cb.state == StateHalfOpen && cb.successCount >= 1 {
+		cb.state = StateClosed
+	}
+}
+
+// RecordFailure records a failed execution
+func (cb *CircuitBreaker) RecordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failureCount++
+	cb.lastFailureTime = time.Now()
+
+	if cb.failureCount >= cb.failureThreshold {
+		cb.state = StateOpen
+		cb.nextAttemptTime = time.Now().Add(cb.timeout)
+	}
+}
+
+// GetState returns the current state of the circuit breaker
+func (cb *CircuitBreaker) GetState() CircuitBreakerState {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	return cb.state
+}
+
 // Ingestor handles data ingestion from various RPKI sources
 type Ingestor struct {
-	rrdpClient   *rrdp.Client
-	rsyncClient  *rsync.Client
-	roaProcessor *service.ROAProcessor
-	httpClient   *http.Client
-	dbClient     interface {
+	rrdpClient      *rrdp.Client
+	rsyncClient     *rsync.Client
+	roaProcessor    *service.ROAProcessor
+	httpClient      *http.Client
+	cache           *IngestionCache
+	config          *IngestionConfig
+	circuitBreakers sync.Map // map[string]*CircuitBreaker
+	dbClient        interface {
 		GetOrCreateASN(ctx context.Context, number int, name, country string) (*model.ASN, error)
 		GetASNByID(ctx context.Context, id string) (*model.ASN, error)
 		GetOrCreateTrustAnchor(ctx context.Context, name, uri, rsaKey, sha256 string) (*model.TrustAnchor, error)
 		GetPrefixByCIDR(ctx context.Context, cidr string) (*model.Prefix, error)
+		UpsertPrefix(ctx context.Context, prefix *model.Prefix) (*model.Prefix, error)
 		InsertPrefix(ctx context.Context, prefix *model.Prefix) error
 		InsertROA(ctx context.Context, roa *model.ROA) error
+		BatchInsertVRPs(ctx context.Context, vrps []*model.VRP) error
 		InsertVRP(ctx context.Context, vrp *model.VRP) error
 	}
 }
@@ -44,22 +246,45 @@ func NewIngestor(dbClient interface {
 	GetASNByID(ctx context.Context, id string) (*model.ASN, error)
 	GetOrCreateTrustAnchor(ctx context.Context, name, uri, rsaKey, sha256 string) (*model.TrustAnchor, error)
 	GetPrefixByCIDR(ctx context.Context, cidr string) (*model.Prefix, error)
+	UpsertPrefix(ctx context.Context, prefix *model.Prefix) (*model.Prefix, error)
 	InsertPrefix(ctx context.Context, prefix *model.Prefix) error
 	InsertROA(ctx context.Context, roa *model.ROA) error
+	BatchInsertVRPs(ctx context.Context, vrps []*model.VRP) error
 	InsertVRP(ctx context.Context, vrp *model.VRP) error
-}) *Ingestor {
+}) (*Ingestor, error) {
+	rsyncClient, err := rsync.NewClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rsync client: %w", err)
+	}
+
 	roaProc := service.NewROAProcessor()
 	roaProc.SetDBClient(dbClient)
 
 	return &Ingestor{
 		rrdpClient:   rrdp.NewClient(),
-		rsyncClient:  rsync.NewClient(),
+		rsyncClient:  rsyncClient,
 		roaProcessor: roaProc,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 15 * time.Minute, // Increased for large RRDP snapshots
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				DisableKeepAlives:   false,
+			},
+		},
+		cache: &IngestionCache{
+			ttl: 10 * time.Minute, // Cache for 10 minutes during ingestion
+		},
+		config: &IngestionConfig{
+			MaxRetries:      3,
+			RetryBackoff:    5 * time.Second,
+			Timeout:         15 * time.Minute, // Match HTTP client timeout
+			SkipOnFailure:   false,
+			ValidationLevel: Lenient,
 		},
 		dbClient: dbClient,
-	}
+	}, nil
 }
 
 // ensureTrustAnchors creates default trust anchors if they don't exist
@@ -120,78 +345,59 @@ func (i *Ingestor) ensureTrustAnchors(ctx context.Context) error {
 
 // IngestFromRIPE ingests data from RIPE NCC sources
 func (i *Ingestor) IngestFromRIPE(ctx context.Context) error {
-	// Skip RIPEstat as it requires parameters and doesn't provide bulk data
-	// Ingest from RIPE RRDP
-	if err := i.ingestFromRIPERRDP(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from RIPE RRDP: %w", err)
-	}
-
-	// Ingest from RIPE rsync
-	if err := i.ingestFromRIPERsync(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from RIPE rsync: %w", err)
-	}
-
-	return nil
+	return i.ingestFromRRDPWithFallback(
+		ctx,
+		"RIPE NCC",
+		"https://rrdp.ripe.net/notification.xml",
+		"rsync://rpki.ripe.net/repository/",
+	)
 }
 
 // IngestFromAFRINIC ingests data from AFRINIC sources
 func (i *Ingestor) IngestFromAFRINIC(ctx context.Context) error {
-	// Ingest from AFRINIC RRDP
-	if err := i.ingestFromAFRINICRRDP(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from AFRINIC RRDP: %w", err)
-	}
+	// AFRINIC RRDP is unreliable - use extended timeout and prefer rsync fallback
+	fmt.Println("Note: AFRINIC RRDP has known performance issues, using extended timeout")
 
-	// Ingest from AFRINIC rsync
-	if err := i.ingestFromAFRINICRsync(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from AFRINIC rsync: %w", err)
-	}
+	// Try RRDP with longer timeout (20 minutes for AFRINIC)
+	rrdpCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
 
-	return nil
+	return i.ingestFromRRDPWithFallback(
+		rrdpCtx,
+		"AFRINIC",
+		"https://rrdp.afrinic.net/notification.xml",
+		"rsync://rpki.afrinic.net/repository/",
+	)
 }
 
 // IngestFromAPNIC ingests data from APNIC sources
 func (i *Ingestor) IngestFromAPNIC(ctx context.Context) error {
-	// Ingest from APNIC RRDP
-	if err := i.ingestFromAPNICRRDP(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from APNIC RRDP: %w", err)
-	}
-
-	// Ingest from APNIC rsync
-	if err := i.ingestFromAPNICRsync(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from APNIC rsync: %w", err)
-	}
-
-	return nil
+	return i.ingestFromRRDPWithFallback(
+		ctx,
+		"APNIC",
+		"https://rrdp.apnic.net/notification.xml",
+		"rsync://rpki.apnic.net/repository/",
+	)
 }
 
 // IngestFromARIN ingests data from ARIN sources
 func (i *Ingestor) IngestFromARIN(ctx context.Context) error {
-	// Ingest from ARIN RRDP
-	if err := i.ingestFromARINRRDP(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from ARIN RRDP: %w", err)
-	}
-
-	// Ingest from ARIN rsync
-	if err := i.ingestFromARINRsync(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from ARIN rsync: %w", err)
-	}
-
-	return nil
+	return i.ingestFromRRDPWithFallback(
+		ctx,
+		"ARIN",
+		"https://rrdp.arin.net/notification.xml",
+		"rsync://rpki.arin.net/repository/",
+	)
 }
 
 // IngestFromLACNIC ingests data from LACNIC sources
 func (i *Ingestor) IngestFromLACNIC(ctx context.Context) error {
-	// Ingest from LACNIC RRDP
-	if err := i.ingestFromLACNICRRDP(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from LACNIC RRDP: %w", err)
-	}
-
-	// Ingest from LACNIC rsync
-	if err := i.ingestFromLACNICRsync(ctx); err != nil {
-		return fmt.Errorf("failed to ingest from LACNIC rsync: %w", err)
-	}
-
-	return nil
+	return i.ingestFromRRDPWithFallback(
+		ctx,
+		"LACNIC",
+		"https://rrdp.lacnic.net/rrdp/notification.xml",
+		"rsync://repository.lacnic.net/rpki/",
+	)
 }
 
 // IngestFromCloudflare ingests data from Cloudflare sources
@@ -282,20 +488,6 @@ func (i *Ingestor) ingestFromRIPERRDP(ctx context.Context) error {
 					continue
 				}
 
-				// Insert VRPs into database, ensuring ASN IDs are valid
-				for _, vrp := range vrps {
-					// Verify the ASN exists before inserting VRP
-					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
-					if err != nil || existingASN == nil {
-						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
-						continue
-					}
-
-					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-						fmt.Printf("Error inserting VRP: %v\n", err)
-					}
-				}
-
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -363,20 +555,6 @@ func (i *Ingestor) ingestFromAFRINICRRDP(ctx context.Context) error {
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
-				}
-
-				// Insert VRPs into database, ensuring ASN IDs are valid
-				for _, vrp := range vrps {
-					// Verify the ASN exists before inserting VRP
-					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
-					if err != nil || existingASN == nil {
-						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
-						continue
-					}
-
-					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-						fmt.Printf("Error inserting VRP: %v\n", err)
-					}
 				}
 
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
@@ -448,20 +626,6 @@ func (i *Ingestor) ingestFromAPNICRRDP(ctx context.Context) error {
 					continue
 				}
 
-				// Insert VRPs into database, ensuring ASN IDs are valid
-				for _, vrp := range vrps {
-					// Verify the ASN exists before inserting VRP
-					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
-					if err != nil || existingASN == nil {
-						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
-						continue
-					}
-
-					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-						fmt.Printf("Error inserting VRP: %v\n", err)
-					}
-				}
-
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -531,20 +695,6 @@ func (i *Ingestor) ingestFromARINRRDP(ctx context.Context) error {
 					continue
 				}
 
-				// Insert VRPs into database, ensuring ASN IDs are valid
-				for _, vrp := range vrps {
-					// Verify the ASN exists before inserting VRP
-					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
-					if err != nil || existingASN == nil {
-						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
-						continue
-					}
-
-					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-						fmt.Printf("Error inserting VRP: %v\n", err)
-					}
-				}
-
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
 			}
 		}
@@ -612,20 +762,6 @@ func (i *Ingestor) ingestFromLACNICRRDP(ctx context.Context) error {
 				if err != nil {
 					fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
 					continue
-				}
-
-				// Insert VRPs into database, ensuring ASN IDs are valid
-				for _, vrp := range vrps {
-					// Verify the ASN exists before inserting VRP
-					existingASN, err := i.dbClient.GetASNByID(ctx, vrp.ASNID)
-					if err != nil || existingASN == nil {
-						fmt.Printf("VRP references non-existent ASN ID %s, skipping\n", vrp.ASNID)
-						continue
-					}
-
-					if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-						fmt.Printf("Error inserting VRP: %v\n", err)
-					}
 				}
 
 				fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
@@ -700,33 +836,18 @@ func (i *Ingestor) processCloudflareData(ctx context.Context, rawData []byte) ([
 	var vrps []*model.VRP
 
 	for _, cfRoa := range cfData.Roas {
-		// Get or create ASN
-		asn, err := i.dbClient.GetOrCreateASN(ctx, cfRoa.ASN, fmt.Sprintf("AS%d", cfRoa.ASN), "")
+		// Get or create ASN (cached)
+		asn, err := i.getOrCreateASNCached(ctx, cfRoa.ASN, fmt.Sprintf("AS%d", cfRoa.ASN), "")
 		if err != nil {
 			fmt.Printf("Error getting/creating ASN %d: %v\n", cfRoa.ASN, err)
 			continue
 		}
 
-		// Get or create Prefix
-		prefix, err := i.dbClient.GetPrefixByCIDR(ctx, cfRoa.Prefix)
+		// Get or create Prefix (cached)
+		prefix, err := i.getOrCreatePrefixCached(ctx, cfRoa.Prefix, asn.ID, cfRoa.MaxLength)
 		if err != nil {
-			fmt.Printf("Error getting prefix %s: %v\n", cfRoa.Prefix, err)
+			fmt.Printf("Error getting/creating prefix %s: %v\n", cfRoa.Prefix, err)
 			continue
-		}
-		if prefix == nil {
-			prefix = &model.Prefix{
-				ID:              uuid.New().String(),
-				CIDR:            cfRoa.Prefix,
-				ASNID:           asn.ID,
-				MaxLength:       sql.NullInt64{Int64: int64(cfRoa.MaxLength), Valid: true},
-				ValidationState: "UNKNOWN",
-				CreatedAt:       time.Now(),
-				UpdatedAt:       time.Now(),
-			}
-			if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-				fmt.Printf("Error inserting prefix %s: %v\n", cfRoa.Prefix, err)
-				continue
-			}
 		}
 
 		// Get trust anchor
@@ -815,33 +936,18 @@ func (i *Ingestor) processRIPEData(ctx context.Context, rawData []byte) ([]*mode
 			continue
 		}
 
-		// Get or create ASN
-		asn, err := i.dbClient.GetOrCreateASN(ctx, validation.ASN, fmt.Sprintf("AS%d", validation.ASN), "")
+		// Get or create ASN (cached)
+		asn, err := i.getOrCreateASNCached(ctx, validation.ASN, fmt.Sprintf("AS%d", validation.ASN), "")
 		if err != nil {
 			fmt.Printf("Error getting/creating ASN %d: %v\n", validation.ASN, err)
 			continue
 		}
 
-		// Get or create Prefix
-		prefix, err := i.dbClient.GetPrefixByCIDR(ctx, validation.Prefix)
+		// Get or create Prefix (cached)
+		prefix, err := i.getOrCreatePrefixCached(ctx, validation.Prefix, asn.ID, validation.MaxLength)
 		if err != nil {
-			fmt.Printf("Error getting prefix %s: %v\n", validation.Prefix, err)
+			fmt.Printf("Error getting/creating prefix %s: %v\n", validation.Prefix, err)
 			continue
-		}
-		if prefix == nil {
-			prefix = &model.Prefix{
-				ID:              uuid.New().String(),
-				CIDR:            validation.Prefix,
-				ASNID:           asn.ID,
-				MaxLength:       sql.NullInt64{Int64: int64(validation.MaxLength), Valid: true},
-				ValidationState: "UNKNOWN",
-				CreatedAt:       time.Now(),
-				UpdatedAt:       time.Now(),
-			}
-			if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-				fmt.Printf("Error inserting prefix %s: %v\n", validation.Prefix, err)
-				continue
-			}
 		}
 
 		// Get RIPE trust anchor
@@ -878,16 +984,18 @@ func (i *Ingestor) processRIPEData(ctx context.Context, rawData []byte) ([]*mode
 			continue
 		}
 
-		// Insert VRPs
+		// Set ROA ID on VRPs
 		for _, vrp := range vrpList {
 			vrp.ROAID = roa.ID
-			if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-				fmt.Printf("Error inserting VRP: %v\n", err)
-			}
 		}
 
 		roas = append(roas, roa)
 		vrps = append(vrps, vrpList...)
+
+		// Batch insert VRPs for this ROA
+		if err := i.dbClient.BatchInsertVRPs(ctx, vrpList); err != nil {
+			fmt.Printf("Error batch inserting VRPs for ROA %s: %v\n", roa.ID, err)
+		}
 	}
 
 	return roas, vrps, nil
@@ -921,33 +1029,18 @@ func (i *Ingestor) processAlternativeRIPEData(ctx context.Context, data map[stri
 				}
 
 				if asnNum > 0 && prefixStr != "" {
-					// Get or create ASN
-					asn, err := i.dbClient.GetOrCreateASN(ctx, asnNum, fmt.Sprintf("AS%d", asnNum), "")
+					// Get or create ASN (cached)
+					asn, err := i.getOrCreateASNCached(ctx, asnNum, fmt.Sprintf("AS%d", asnNum), "")
 					if err != nil {
 						fmt.Printf("Error getting/creating ASN %d: %v\n", asnNum, err)
 						continue
 					}
 
-					// Get or create Prefix
-					prefix, err := i.dbClient.GetPrefixByCIDR(ctx, prefixStr)
+					// Get or create Prefix (cached)
+					prefix, err := i.getOrCreatePrefixCached(ctx, prefixStr, asn.ID, maxLen)
 					if err != nil {
-						fmt.Printf("Error getting prefix %s: %v\n", prefixStr, err)
+						fmt.Printf("Error getting/creating prefix %s: %v\n", prefixStr, err)
 						continue
-					}
-					if prefix == nil {
-						prefix = &model.Prefix{
-							ID:              uuid.New().String(),
-							CIDR:            prefixStr,
-							ASNID:           asn.ID,
-							MaxLength:       sql.NullInt64{Int64: int64(maxLen), Valid: true},
-							ValidationState: "UNKNOWN",
-							CreatedAt:       time.Now(),
-							UpdatedAt:       time.Now(),
-						}
-						if err := i.dbClient.InsertPrefix(ctx, prefix); err != nil {
-							fmt.Printf("Error inserting prefix %s: %v\n", prefixStr, err)
-							continue
-						}
 					}
 
 					// Get trust anchor
@@ -981,16 +1074,18 @@ func (i *Ingestor) processAlternativeRIPEData(ctx context.Context, data map[stri
 						continue
 					}
 
-					// Insert VRPs
+					// Set ROA ID on VRPs
 					for _, vrp := range vrpList {
 						vrp.ROAID = roa.ID
-						if err := i.dbClient.InsertVRP(ctx, vrp); err != nil {
-							fmt.Printf("Error inserting VRP: %v\n", err)
-						}
 					}
 
 					roas = append(roas, roa)
 					vrps = append(vrps, vrpList...)
+
+					// Batch insert VRPs for this ROA
+					if err := i.dbClient.BatchInsertVRPs(ctx, vrpList); err != nil {
+						fmt.Printf("Error batch inserting VRPs for ROA %s: %v\n", roa.ID, err)
+					}
 				}
 			}
 		}
@@ -1006,51 +1101,253 @@ func (i *Ingestor) IngestFromAllSources(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure trust anchors: %w", err)
 	}
 
-	sources := []struct {
-		name string
-		fn   func(context.Context) error
-	}{
-		{"RIPE", i.IngestFromRIPE},
-		{"AFRINIC", i.IngestFromAFRINIC},
-		{"APNIC", i.IngestFromAPNIC},
-		{"ARIN", i.IngestFromARIN},
-		{"LACNIC", i.IngestFromLACNIC},
-		{"Cloudflare", i.IngestFromCloudflare},
+	// Create worker pool with limited concurrency (3 workers to avoid overwhelming sources)
+	pool := NewWorkerPool(3, i)
+
+	tasks := []Task{
+		{Name: "RIPE", Fn: i.IngestFromRIPE},
+		{Name: "AFRINIC", Fn: i.IngestFromAFRINIC},
+		{Name: "APNIC", Fn: i.IngestFromAPNIC},
+		{Name: "ARIN", Fn: i.IngestFromARIN},
+		{Name: "LACNIC", Fn: i.IngestFromLACNIC},
+		{Name: "Cloudflare", Fn: i.IngestFromCloudflare},
 	}
 
-	// Use goroutines for concurrent processing
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(sources))
+	return pool.Execute(ctx, tasks)
+}
 
-	for _, source := range sources {
-		wg.Add(1)
-		go func(name string, fn func(context.Context) error) {
-			defer wg.Done()
-			fmt.Printf("Starting ingestion from %s...\n", name)
-			if err := fn(ctx); err != nil {
-				fmt.Printf("Error ingesting from %s: %v\n", name, err)
-				errChan <- fmt.Errorf("%s: %w", name, err)
-			} else {
-				fmt.Printf("Completed ingestion from %s\n", name)
+// getOrCreateASNCached gets or creates an ASN with caching
+func (i *Ingestor) getOrCreateASNCached(ctx context.Context, number int, name, country string) (*model.ASN, error) {
+	// Check cache first
+	if cached, ok := i.cache.asns.Load(number); ok {
+		return cached.(*model.ASN), nil
+	}
+
+	// Not in cache, get/create from DB
+	asn, err := i.dbClient.GetOrCreateASN(ctx, number, name, country)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store in cache
+	i.cache.asns.Store(number, asn)
+	return asn, nil
+}
+
+// getOrCreatePrefixCached gets or creates a prefix with caching
+func (i *Ingestor) getOrCreatePrefixCached(ctx context.Context, cidr string, asnID string, maxLength int) (*model.Prefix, error) {
+	// Check cache first
+	if cached, ok := i.cache.prefixes.Load(cidr); ok {
+		return cached.(*model.Prefix), nil
+	}
+
+	// Not in cache, get from DB first
+	prefix, err := i.dbClient.GetPrefixByCIDR(ctx, cidr)
+	if err != nil {
+		return nil, err
+	}
+
+	if prefix == nil {
+		// Create new prefix
+		prefix = &model.Prefix{
+			ID:              uuid.New().String(),
+			CIDR:            cidr,
+			ASNID:           asnID,
+			MaxLength:       sql.NullInt64{Int64: int64(maxLength), Valid: true},
+			ValidationState: "UNKNOWN",
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
+		}
+		prefix, err = i.dbClient.UpsertPrefix(ctx, prefix)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Store in cache
+	i.cache.prefixes.Store(cidr, prefix)
+	return prefix, nil
+}
+
+// getCircuitBreaker gets or creates a circuit breaker for a TA
+func (i *Ingestor) getCircuitBreaker(taName string) *CircuitBreaker {
+	cb, exists := i.circuitBreakers.Load(taName)
+	if !exists {
+		// Create new circuit breaker with default settings
+		newCB := NewCircuitBreaker(3, 5*time.Minute) // 3 failures, 5 minute timeout
+		cb, _ = i.circuitBreakers.LoadOrStore(taName, newCB)
+	}
+	return cb.(*CircuitBreaker)
+}
+
+// ingestFromRRDPWithFallback tries RRDP first, falls back to rsync
+func (i *Ingestor) ingestFromRRDPWithFallback(ctx context.Context, taName, rrdpURL, rsyncURL string) error {
+	// Try RRDP first
+	fmt.Printf("→ Attempting RRDP ingestion for %s from %s\n", taName, rrdpURL)
+	err := i.ingestFromRRDP(ctx, taName, rrdpURL)
+	if err == nil {
+		fmt.Printf("✓ Successfully ingested %s via RRDP\n", taName)
+		return nil
+	}
+
+	fmt.Printf("⚠ RRDP failed for %s: %v\n", taName, err)
+	fmt.Printf("→ Falling back to rsync for %s...\n", taName)
+
+	// Fall back to rsync
+	localPath := fmt.Sprintf("/tmp/rpki-%s", strings.ToLower(strings.ReplaceAll(taName, " ", "")))
+	if err := i.rsyncClient.Sync(rsyncURL, localPath); err != nil {
+		return fmt.Errorf("both RRDP and rsync failed for %s: RRDP error: %v, rsync error: %w", taName, err, err)
+	}
+
+	fmt.Printf("✓ Successfully synced %s repository to %s\n", taName, localPath)
+	return i.processLocalRPKIFiles(ctx, taName, localPath)
+}
+
+// ingestFromRRDP ingests from RRDP with proper logging
+func (i *Ingestor) ingestFromRRDP(ctx context.Context, taName, notificationURL string) error {
+	fmt.Printf("→ Fetching RRDP notification for %s from %s\n", taName, notificationURL)
+
+	notification, err := i.rrdpClient.FetchNotification(notificationURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch notification: %w", err)
+	}
+
+	fmt.Printf("  ✓ Got notification (serial: %d, session: %s)\n",
+		notification.Serial, notification.SessionID)
+
+	if notification.Snapshot.URI == "" {
+		return fmt.Errorf("no snapshot URI in notification")
+	}
+
+	fmt.Printf("→ Downloading snapshot from %s\n", notification.Snapshot.URI)
+	fmt.Printf("  (This may take several minutes for large snapshots...)\n")
+
+	snapshot, err := i.rrdpClient.FetchSnapshot(notification.Snapshot.URI)
+	if err != nil {
+		return fmt.Errorf("failed to fetch snapshot: %w", err)
+	}
+
+	fmt.Printf("  ✓ Downloaded snapshot with %d objects\n", len(snapshot.Publishes))
+
+	// Get trust anchor with correct URI
+	var taURI string
+	switch taName {
+	case "RIPE NCC":
+		taURI = "rsync://rpki.ripe.net/repository/"
+	case "AFRINIC":
+		taURI = "rsync://rpki.afrinic.net/repository/"
+	case "APNIC":
+		taURI = "rsync://rpki.apnic.net/repository/"
+	case "ARIN":
+		taURI = "rsync://rpki.arin.net/repository/"
+	case "LACNIC":
+		taURI = "rsync://repository.lacnic.net/rpki/"
+	default:
+		taURI = fmt.Sprintf("rsync://%s/", strings.ToLower(taName))
+	}
+
+	ta, err := i.dbClient.GetOrCreateTrustAnchor(ctx, taName, taURI, "", "")
+	if err != nil {
+		return fmt.Errorf("failed to get trust anchor: %w", err)
+	}
+
+	// Process snapshot publishes
+	for _, publish := range snapshot.Publishes {
+		if strings.HasSuffix(publish.URI, ".roa") {
+			// Use improved base64 decoding
+			decodedData, err := i.cleanBase64(publish.Data)
+			if err != nil {
+				fmt.Printf("Skipping ROA %s due to base64 decoding error: %v\n", publish.URI, err)
+				continue
 			}
-		}(source.name, source.fn)
-	}
 
-	// Wait for all goroutines to complete
-	wg.Wait()
-	close(errChan)
+			vrps, err := i.roaProcessor.ExtractVRPsFromROAFile(ctx, decodedData, ta)
+			if err != nil {
+				fmt.Printf("Error processing ROA %s: %v\n", publish.URI, err)
+				continue
+			}
 
-	// Collect any errors
-	var errors []error
-	for err := range errChan {
-		errors = append(errors, err)
-	}
-
-	if len(errors) > 0 {
-		return fmt.Errorf("ingestion completed with errors: %v", errors)
+			fmt.Printf("Processed ROA %s: %d VRPs\n", publish.URI, len(vrps))
+		}
 	}
 
 	return nil
+}
+
+// processLocalRPKIFiles processes files downloaded via rsync
+func (i *Ingestor) processLocalRPKIFiles(ctx context.Context, taName, localPath string) error {
+	// TODO: Implement local file processing for rsync fallback
+	// This would walk the directory tree and process .roa files
+	fmt.Printf("Note: Local file processing for %s not yet implemented\n", taName)
+	return nil
+}
+
+// cleanBase64 properly cleans base64 data with all whitespace handling
+func (i *Ingestor) cleanBase64(data string) ([]byte, error) {
+	// Remove ALL whitespace and control characters
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, data)
+
+	// Remove any remaining non-base64 characters
+	cleaned = strings.Map(func(r rune) rune {
+		if (r >= 'A' && r <= 'Z') ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') ||
+			r == '+' || r == '/' || r == '=' {
+			return r
+		}
+		return -1
+	}, cleaned)
+
+	return base64.StdEncoding.DecodeString(cleaned)
+}
+
+// ingestWithRetry wraps an ingestion function with retry logic and circuit breaker
+func (i *Ingestor) ingestWithRetry(ctx context.Context, name string, fn func(context.Context) error) error {
+	cb := i.getCircuitBreaker(name)
+
+	// Check if circuit breaker allows execution
+	if !cb.CanExecute() {
+		fmt.Printf("Circuit breaker open for %s, skipping ingestion\n", name)
+		return fmt.Errorf("circuit breaker open for %s", name)
+	}
+
+	var err error
+	for attempt := 0; attempt <= i.config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: base delay * 2^(attempt-1)
+			backoff := time.Duration(attempt) * i.config.RetryBackoff
+			fmt.Printf("Retrying %s ingestion in %v (attempt %d/%d)\n", name, backoff, attempt, i.config.MaxRetries)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				cb.RecordFailure()
+				return ctx.Err()
+			}
+		}
+
+		err = fn(ctx)
+		if err == nil {
+			cb.RecordSuccess()
+			return nil
+		}
+
+		fmt.Printf("Attempt %d failed for %s: %v\n", attempt+1, name, err)
+	}
+
+	// All attempts failed
+	cb.RecordFailure()
+
+	if i.config.SkipOnFailure {
+		fmt.Printf("Skipping %s after %d failed attempts\n", name, i.config.MaxRetries+1)
+		return nil
+	}
+
+	return fmt.Errorf("all %d attempts failed for %s: %w", i.config.MaxRetries+1, name, err)
 }
 
 // Helper function to parse ASN from string
@@ -1064,4 +1361,18 @@ func parseASN(asnStr string) (int, error) {
 func validateCIDR(cidr string) error {
 	_, _, err := net.ParseCIDR(cidr)
 	return err
+}
+
+// cleanBase64Data removes all non-base64 characters including whitespace
+func cleanBase64Data(data string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+			return r
+		}
+		return -1
+	}, data)
 }

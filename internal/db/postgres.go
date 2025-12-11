@@ -1007,37 +1007,41 @@ func (c *PostgresClient) GetROAByVRP(ctx context.Context, vrpID string) (*model.
 	return &roa, nil
 }
 
-// InsertASN inserts a new ASN into the database
-func (c *PostgresClient) InsertASN(ctx context.Context, asn *model.ASN) error {
+// UpsertASN inserts or updates an ASN in the database
+func (c *PostgresClient) UpsertASN(ctx context.Context, asn *model.ASN) (*model.ASN, error) {
 	query := `
 		INSERT INTO asns (id, number, name, country, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (number) DO NOTHING
+		ON CONFLICT (number) DO UPDATE SET
+			name = COALESCE(EXCLUDED.name, asns.name),
+			country = COALESCE(EXCLUDED.country, asns.country),
+			updated_at = EXCLUDED.updated_at
+		RETURNING id, number, name, country, created_at, updated_at
 	`
 
-	_, err := c.db.ExecContext(ctx, query,
-		asn.ID, asn.Number, asn.Name, asn.Country, asn.CreatedAt, asn.UpdatedAt,
-	)
+	var result model.ASN
+	err := c.db.QueryRowContext(ctx, query,
+		asn.ID, asn.Number, asn.Name, asn.Country,
+		asn.CreatedAt, asn.UpdatedAt,
+	).Scan(&result.ID, &result.Number, &result.Name,
+		&result.Country, &result.CreatedAt, &result.UpdatedAt)
+
 	if err != nil {
-		return fmt.Errorf("failed to insert ASN: %w", err)
+		return nil, fmt.Errorf("failed to upsert ASN: %w", err)
 	}
 
-	return nil
+	return &result, nil
+}
+
+// InsertASN inserts a new ASN into the database (legacy method)
+func (c *PostgresClient) InsertASN(ctx context.Context, asn *model.ASN) error {
+	_, err := c.UpsertASN(ctx, asn)
+	return err
 }
 
 // GetOrCreateASN gets an existing ASN by number or creates a new one
 func (c *PostgresClient) GetOrCreateASN(ctx context.Context, number int, name, country string) (*model.ASN, error) {
-	// First try to get existing ASN
-	existing, err := c.GetASNByNumber(ctx, number)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existing ASN: %w", err)
-	}
-
-	if existing != nil {
-		return existing, nil
-	}
-
-	// Create new ASN
+	// Create ASN object
 	asn := &model.ASN{
 		ID:        uuid.New().String(),
 		Number:    number,
@@ -1047,43 +1051,47 @@ func (c *PostgresClient) GetOrCreateASN(ctx context.Context, number int, name, c
 		UpdatedAt: time.Now(),
 	}
 
-	// Try to insert, ignore conflicts
-	err = c.InsertASN(ctx, asn)
+	// Use UPSERT to handle conflicts atomically
+	result, err := c.UpsertASN(ctx, asn)
 	if err != nil {
-		// If insert failed, it might be due to conflict - try to get existing again
-		existing, err := c.GetASNByNumber(ctx, number)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get ASN after insert attempt: %w", err)
-		}
-		if existing != nil {
-			fmt.Printf("DEBUG: Found existing trust anchor %q (ID: %s) for request %q\n", existing.Name, existing.ID, name)
-			return existing, nil
-		}
-
-		fmt.Printf("DEBUG: Creating new trust anchor %q\n", name)
-		return nil, fmt.Errorf("failed to create or retrieve ASN: %w", err)
+		return nil, fmt.Errorf("failed to get or create ASN: %w", err)
 	}
 
-	return asn, nil
+	return result, nil
 }
 
-// InsertPrefix inserts a new prefix into the database
-func (c *PostgresClient) InsertPrefix(ctx context.Context, prefix *model.Prefix) error {
+// UpsertPrefix inserts or updates a prefix in the database
+func (c *PostgresClient) UpsertPrefix(ctx context.Context, prefix *model.Prefix) (*model.Prefix, error) {
 	query := `
 		INSERT INTO prefixes (id, cidr, asn_id, max_length, expires_at, validation_state, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (cidr) DO NOTHING
+		ON CONFLICT (cidr) DO UPDATE SET
+			asn_id = EXCLUDED.asn_id,
+			max_length = EXCLUDED.max_length,
+			expires_at = EXCLUDED.expires_at,
+			validation_state = EXCLUDED.validation_state,
+			updated_at = EXCLUDED.updated_at
+		RETURNING id, cidr, asn_id, max_length, expires_at, validation_state, created_at, updated_at
 	`
 
-	_, err := c.db.ExecContext(ctx, query,
+	var result model.Prefix
+	err := c.db.QueryRowContext(ctx, query,
 		prefix.ID, prefix.CIDR, prefix.ASNID, prefix.MaxLength,
 		prefix.ExpiresAt, prefix.ValidationState, prefix.CreatedAt, prefix.UpdatedAt,
-	)
+	).Scan(&result.ID, &result.CIDR, &result.ASNID, &result.MaxLength,
+		&result.ExpiresAt, &result.ValidationState, &result.CreatedAt, &result.UpdatedAt)
+
 	if err != nil {
-		return fmt.Errorf("failed to insert prefix: %w", err)
+		return nil, fmt.Errorf("failed to upsert prefix: %w", err)
 	}
 
-	return nil
+	return &result, nil
+}
+
+// InsertPrefix inserts a new prefix into the database (legacy method)
+func (c *PostgresClient) InsertPrefix(ctx context.Context, prefix *model.Prefix) error {
+	_, err := c.UpsertPrefix(ctx, prefix)
+	return err
 }
 
 // InsertROA inserts a new ROA into the database
@@ -1104,6 +1112,59 @@ func (c *PostgresClient) InsertROA(ctx context.Context, roa *model.ROA) error {
 	}
 
 	return nil
+}
+
+// BatchInsertVRPs inserts multiple VRPs in batches
+func (c *PostgresClient) BatchInsertVRPs(ctx context.Context, vrps []*model.VRP) error {
+	if len(vrps) == 0 {
+		return nil
+	}
+
+	const batchSize = 1000
+	for i := 0; i < len(vrps); i += batchSize {
+		end := i + batchSize
+		if end > len(vrps) {
+			end = len(vrps)
+		}
+
+		batch := vrps[i:end]
+		if err := c.insertVRPBatch(ctx, batch); err != nil {
+			return fmt.Errorf("failed to insert batch at index %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *PostgresClient) insertVRPBatch(ctx context.Context, vrps []*model.VRP) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO vrps (id, asn_id, prefix_id, max_length, not_before, not_after, roa_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (asn_id, prefix_id, max_length) DO NOTHING
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, vrp := range vrps {
+		_, err := stmt.ExecContext(ctx,
+			vrp.ID, vrp.ASNID, vrp.PrefixID, vrp.MaxLength,
+			vrp.NotBefore, vrp.NotAfter, vrp.ROAID,
+			vrp.CreatedAt, vrp.UpdatedAt,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 // InsertVRP inserts a new VRP into the database

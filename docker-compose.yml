@@ -1,0 +1,103 @@
+services:
+  routinator:
+    image: nlnetlabs/routinator:latest
+    container_name: routinator
+    restart: unless-stopped
+    
+    # Persistent cache volume (MANDATORY)
+    volumes:
+      - routinator-cache:/home/routinator/.rpki-cache
+    
+    # Environment variable to accept ARIN TAL automatically
+    environment:
+      - ARIN_TAL_ACCEPT=yes
+    
+    # Routinator command configuration
+    # Default entrypoint is already set to "routinator" in the image
+    command:
+      - "server"
+      - "--rtr"
+      - "0.0.0.0:3323"
+      - "--http"
+      - "0.0.0.0:8323"
+    
+    # Expose HTTP for VRP JSON and RTR (future)
+    ports:
+      - "8323:8323"  # HTTP JSON endpoint
+      - "3323:3323"  # RTR port (for future use)
+    
+    # Health check - use a simpler test
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /home/routinator/.rpki-cache/repository || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    
+    networks:
+      - rpki-network
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  rpki-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rpki-backend
+    restart: unless-stopped
+    
+    depends_on:
+      - routinator
+    
+    environment:
+      - ROUTINATOR_URL=http://routinator:8323
+      - POLL_INTERVAL_SECONDS=600
+      - STATE_DIR=/app/state
+      - LOG_LEVEL=INFO
+      - API_PORT=8080
+    
+    volumes:
+      - backend-state:/app/state
+    
+    ports:
+      - "8080:8080"  # Backend API
+    
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    
+    networks:
+      - rpki-network
+    
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+networks:
+  rpki-network:
+    driver: bridge
+    internal: false  # Allow external access for RIR repositories
+
+volumes:
+  routinator-cache:
+    driver: local
+  routinator-tals:
+    driver: local
+  backend-state:
+    driver: local

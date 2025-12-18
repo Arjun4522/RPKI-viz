@@ -11,17 +11,58 @@ RPKI-viz is a Docker-based microservices architecture consisting of two core com
 
 ### Component Diagram
 
-```
-┌─────────────────┐    HTTP/JSON    ┌─────────────────┐    REST API     ┌─────────────────┐
-│   Routinator    │ ◄─────────────── │ RPKI Backend    │ ──────────────► │   Client Apps   │
-│ (nlnetlabs/img) │     port 8323   │ (Python/Flask)  │    port 8080   │ (Visualization)  │
-└─────────────────┘                 └─────────────────┘                └─────────────────┘
-        │                                   │                                    │
-        ▼                                   ▼                                    ▼
-┌─────────────────┐             ┌─────────────────┐                 ┌─────────────────┐
-│ RIR Repositories │             │  State Storage   │                 │   Prometheus    │
-│   (Internet)     │             │  (JSON files)    │                 │    Metrics      │
-└─────────────────┘             └─────────────────┘                 └─────────────────┘
+```mermaid
+flowchart TD
+    %% External Systems
+    RIR[Regional Internet Registries<br/>ARIN, RIPE, APNIC, etc.]
+    CLIENTS[Client Applications<br/>Visualization Tools]
+    PROM[Prometheus<br/>Monitoring System]
+
+    %% Core Services
+    ROUT[Routinator<br/>NLnet Labs RPKI Validator<br/>port: 8323]
+    BACKEND[RPKI Backend<br/>Python/Flask Application<br/>port: 8080]
+
+    %% Data Storage
+    CACHE[Routinator Cache<br/>RPKI Repository Data]
+    STATE[Backend State<br/>VRP Snapshots & Diffs]
+
+    %% Network Connections
+    RIR -- RPKI Repository Sync --> ROUT
+    ROUT -- HTTP/JSON API --> BACKEND
+    BACKEND -- REST API --> CLIENTS
+    BACKEND -- Metrics --> PROM
+
+    %% Storage Connections
+    ROUT -- Cache Storage --> CACHE
+    BACKEND -- State Storage --> STATE
+
+    %% Internal Components
+    subgraph BACKEND [RPKI Backend Components]
+        direction LR
+        MAIN[main.py<br/>Application Controller]
+        API[api_server.py<br/>Flask API Server]
+        VRP[vrp_loader.py<br/>Routinator Integration]
+        DIFF[diff_engine.py<br/>Change Detection]
+        METR[metrics.py<br/>Prometheus Metrics]
+    end
+
+    %% API Endpoints
+    subgraph API_ENDPOINTS [Backend API Endpoints]
+        direction LR
+        HEALTH[/health<br/>Health Check/]
+        METRICS[/metrics<br/>Prometheus/]
+        STATE_API[/api/v1/state<br/>RPKI State/]
+        VRPS_API[/api/v1/vrps<br/>VRP Data/]
+        DIFF_API[/api/v1/diff<br/>Change Detection/]
+        VALIDATE[/api/v1/validate<br/>Route Validation/]
+    end
+
+    %% Internal Connections
+    MAIN --> API
+    MAIN --> VRP
+    MAIN --> DIFF
+    MAIN --> METR
+    API --> API_ENDPOINTS
 ```
 
 ## Features

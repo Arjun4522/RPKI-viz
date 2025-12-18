@@ -1,10 +1,10 @@
-# RPKI-viz-3
+# RPKI-viz
 
 A production-ready RPKI (Resource Public Key Infrastructure) visualization and validation backend that integrates with Routinator for real-time VRP (Validated ROA Payload) data processing and monitoring.
 
 ## Architecture Overview
 
-RPKI-viz-3 is a Docker-based microservices architecture consisting of two core components:
+RPKI-viz is a Docker-based microservices architecture consisting of two core components:
 
 1. **Routinator** - Official NLnet Labs RPKI validator daemon
 2. **RPKI Backend** - Custom Python application for processing and API exposure
@@ -46,6 +46,7 @@ RPKI-viz-3 is a Docker-based microservices architecture consisting of two core c
 | `/api/v1/vrps` | GET | Get all VRPs with optional filtering |
 | `/api/v1/diff` | GET | Get diff between serial numbers |
 | `/api/v1/validate` | POST | Validate BGP route announcement |
+
 
 ### Example Usage
 
@@ -106,8 +107,8 @@ curl -X POST http://localhost:8080/api/v1/validate \
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
-   cd RPKI-viz-3
+   git clone git@github.com:Arjun4522/RPKI-viz.git
+   cd RPKI-viz
    ```
 
 2. **Start the services**
@@ -118,8 +119,9 @@ curl -X POST http://localhost:8080/api/v1/validate \
 3. **Verify deployment**
    ```bash
    docker-compose ps
-   curl http://localhost:8080/health
+   watch -n 10 'curl -s http://localhost:8323/json 2>&1 | head -5'   
    ```
+Once Initial Validation complete, restart backend container
 
 ### Configuration
 

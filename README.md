@@ -12,57 +12,53 @@ RPKI-viz is a Docker-based microservices architecture consisting of two core com
 ### Component Diagram
 
 ```mermaid
-flowchart TD
-    %% External Systems
-    RIR[Regional Internet Registries<br/>ARIN, RIPE, APNIC, etc.]
-    CLIENTS[Client Applications<br/>Visualization Tools]
-    PROM[Prometheus<br/>Monitoring System]
-
-    %% Core Services
-    ROUT[Routinator<br/>NLnet Labs RPKI Validator<br/>port: 8323]
-    BACKEND[RPKI Backend<br/>Python/Flask Application<br/>port: 8080]
-
-    %% Data Storage
-    CACHE[Routinator Cache<br/>RPKI Repository Data]
-    STATE[Backend State<br/>VRP Snapshots & Diffs]
-
-    %% Network Connections
-    RIR -- RPKI Repository Sync --> ROUT
-    ROUT -- HTTP/JSON API --> BACKEND
-    BACKEND -- REST API --> CLIENTS
-    BACKEND -- Metrics --> PROM
-
-    %% Storage Connections
-    ROUT -- Cache Storage --> CACHE
-    BACKEND -- State Storage --> STATE
-
-    %% Internal Components
-    subgraph BACKEND [RPKI Backend Components]
-        direction LR
-        MAIN[main.py<br/>Application Controller]
-        API[api_server.py<br/>Flask API Server]
-        VRP[vrp_loader.py<br/>Routinator Integration]
-        DIFF[diff_engine.py<br/>Change Detection]
-        METR[metrics.py<br/>Prometheus Metrics]
+graph TB
+    subgraph External["External Systems"]
+        RIR["RIRs (ARIN, RIPE, etc.)"]
+        CLIENT["Client Apps"]
+        PROM["Prometheus"]
     end
 
-    %% API Endpoints
-    subgraph API_ENDPOINTS [Backend API Endpoints]
-        direction LR
-        HEALTH[/health<br/>Health Check/]
-        METRICS[/metrics<br/>Prometheus/]
-        STATE_API[/api/v1/state<br/>RPKI State/]
-        VRPS_API[/api/v1/vrps<br/>VRP Data/]
-        DIFF_API[/api/v1/diff<br/>Change Detection/]
-        VALIDATE[/api/v1/validate<br/>Route Validation/]
+    subgraph Docker["Docker Stack"]
+        ROUT["Routinator Container<br/>(Ports 8323, 3323)"]
+        BACKEND["Backend Container<br/>(Port 8080)"]
+        
+        VOL1[("routinator-cache")]
+        VOL2[("backend-state")]
     end
 
-    %% Internal Connections
-    MAIN --> API
-    MAIN --> VRP
-    MAIN --> DIFF
-    MAIN --> METR
-    API --> API_ENDPOINTS
+    subgraph BackendModules["Backend Components"]
+        VRP["VRP Loader<br/>(Fetch & Validate)"]
+        DIFF["Diff Engine<br/>(Track Changes)"]
+        METR["Metrics"]
+        API["API Server<br/>(Flask)"]
+    end
+
+    %% Data Flow
+    RIR -->|Sync RPKI Data| ROUT
+    ROUT -->|JSON VRPs| VRP
+    VRP -->|Process| DIFF
+    DIFF -->|Store| VOL2
+    
+    CLIENT -->|REST API| API
+    PROM -->|Scrape| METR
+    
+    API -->|Query| DIFF
+    API -->|Record| METR
+    
+    %% Internal
+    ROUT -.->|Cache| VOL1
+    BACKEND --> BackendModules
+
+    classDef external fill:#e1f5ff,stroke:#01579b
+    classDef container fill:#fff3e0,stroke:#e65100
+    classDef module fill:#f3e5f5,stroke:#4a148c
+    classDef storage fill:#e8f5e9,stroke:#1b5e20
+    
+    class RIR,CLIENT,PROM external
+    class ROUT,BACKEND container
+    class BackendModules,VRP,DIFF,METR,API module
+    class VOL1,VOL2 storage
 ```
 
 ## Features

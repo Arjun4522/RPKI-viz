@@ -5,6 +5,7 @@ API Server - Exposes VRP data and observability endpoints
 
 import logging
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from threading import Thread
 from werkzeug.serving import make_server
 from datetime import datetime
@@ -22,6 +23,9 @@ class APIServer:
         # Create Flask app
         self.app = Flask(__name__)
         self.app.json.sort_keys = False
+
+        # Enable CORS for all routes
+        CORS(self.app)
         
         # Disable Flask's default logger
         log = logging.getLogger('werkzeug')

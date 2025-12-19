@@ -89,6 +89,41 @@ services:
           memory: 256M
           cpus: '0.25'
 
+  rpki-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rpki-frontend
+    restart: unless-stopped
+    
+    depends_on:
+      - rpki-backend
+    
+    environment:
+      - VITE_API_URL=http://localhost:8080
+    
+    ports:
+      - "3000:3000"  # Frontend web interface
+    
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    
+    networks:
+      - rpki-network
+    
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
+
 networks:
   rpki-network:
     driver: bridge

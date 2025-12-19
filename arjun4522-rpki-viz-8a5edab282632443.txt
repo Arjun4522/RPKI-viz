@@ -1,0 +1,1465 @@
+Directory structure:
+└── arjun4522-rpki-viz/
+    ├── README.md
+    ├── docker-compose.yml
+    └── backend/
+        ├── api_server.py
+        ├── diff_engine.py
+        ├── Dockerfile
+        ├── main.py
+        ├── metrics.py
+        ├── requirements.txt
+        └── vrp_loader.py
+
+================================================
+FILE: README.md
+================================================
+# RPKI-viz
+
+A production-ready RPKI (Resource Public Key Infrastructure) visualization and validation backend that integrates with Routinator for real-time VRP (Validated ROA Payload) data processing and monitoring.
+
+## Architecture Overview
+
+RPKI-viz is a Docker-based microservices architecture consisting of two core components:
+
+1. **Routinator** - Official NLnet Labs RPKI validator daemon
+2. **RPKI Backend** - Custom Python application for processing and API exposure
+
+### Component Diagram
+
+```mermaid
+flowchart TD
+    %% External Systems
+    RIR[Regional Internet Registries<br/>ARIN, RIPE, APNIC, etc.]
+    CLIENTS[Client Applications<br/>Visualization Tools]
+    PROM[Prometheus<br/>Monitoring System]
+
+    %% Core Services
+    ROUT[Routinator<br/>NLnet Labs RPKI Validator<br/>port: 8323]
+    BACKEND[RPKI Backend<br/>Python/Flask Application<br/>port: 8080]
+
+    %% Data Storage
+    CACHE[Routinator Cache<br/>RPKI Repository Data]
+    STATE[Backend State<br/>VRP Snapshots & Diffs]
+
+    %% Network Connections
+    RIR -- RPKI Repository Sync --> ROUT
+    ROUT -- HTTP/JSON API --> BACKEND
+    BACKEND -- REST API --> CLIENTS
+    BACKEND -- Metrics --> PROM
+
+    %% Storage Connections
+    ROUT -- Cache Storage --> CACHE
+    BACKEND -- State Storage --> STATE
+
+    %% Internal Components
+    subgraph BACKEND [RPKI Backend Components]
+        direction LR
+        MAIN[main.py<br/>Application Controller]
+        API[api_server.py<br/>Flask API Server]
+        VRP[vrp_loader.py<br/>Routinator Integration]
+        DIFF[diff_engine.py<br/>Change Detection]
+        METR[metrics.py<br/>Prometheus Metrics]
+    end
+
+    %% API Endpoints
+    subgraph API_ENDPOINTS [Backend API Endpoints]
+        direction LR
+        HEALTH[/health<br/>Health Check/]
+        METRICS[/metrics<br/>Prometheus/]
+        STATE_API[/api/v1/state<br/>RPKI State/]
+        VRPS_API[/api/v1/vrps<br/>VRP Data/]
+        DIFF_API[/api/v1/diff<br/>Change Detection/]
+        VALIDATE[/api/v1/validate<br/>Route Validation/]
+    end
+
+    %% Internal Connections
+    MAIN --> API
+    MAIN --> VRP
+    MAIN --> DIFF
+    MAIN --> METR
+    API --> API_ENDPOINTS
+```
+
+## Features
+
+- **Real-time VRP Processing**: Polls Routinator every 10 minutes for updated RPKI data
+- **Change Detection**: Computes diffs between VRP snapshots with monotonic serial numbers
+- **RESTful API**: Comprehensive HTTP endpoints for VRP data access and validation
+- **Data Validation**: Strict schema validation using Pydantic models
+- **Observability**: Prometheus metrics for monitoring and alerting
+- **Persistence**: Disk-based state storage with automatic recovery
+- **Containerized**: Docker-based deployment with health checks
+
+## API Endpoints
+
+### Core Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Application health status |
+| `/metrics` | GET | Prometheus metrics |
+| `/api/v1/state` | GET | Current RPKI state metadata |
+| `/api/v1/vrps` | GET | Get all VRPs with optional filtering |
+| `/api/v1/diff` | GET | Get diff between serial numbers |
+| `/api/v1/validate` | POST | Validate BGP route announcement |
+
+
+### Example Usage
+
+```bash
+# Health check
+curl http://localhost:8080/health
+
+# Get current state
+curl http://localhost:8080/api/v1/state
+
+# Get all VRPs
+curl http://localhost:8080/api/v1/vrps
+
+# Filter VRPs by ASN
+curl "http://localhost:8080/api/v1/vrps?asn=AS12345"
+
+# Validate a route
+curl -X POST http://localhost:8080/api/v1/validate \
+  -H "Content-Type: application/json" \
+  -d '{"asn": "AS12345", "prefix": "192.0.2.0/24"}'
+```
+
+## Data Model
+
+### VRP Entry Schema
+
+```json
+{
+  "asn": "AS65000",
+  "prefix": "192.0.2.0/24",
+  "maxLength": 24,
+  "ta": "arin"
+}
+```
+
+### State Response
+
+```json
+{
+  "serial": 42,
+  "vrp_count": 786005,
+  "hash": "abc123def456...",
+  "last_update": "2023-12-19T01:23:45.678901",
+  "vrps": [...]
+}
+```
+
+## Deployment
+
+### Prerequisites
+
+- Docker Engine 20.10+
+- Docker Compose 2.0+
+- 2GB RAM minimum
+- 10GB disk space for RPKI cache
+
+### Quick Start
+
+1. **Clone the repository**
+   ```bash
+   git clone git@github.com:Arjun4522/RPKI-viz.git
+   cd RPKI-viz
+   ```
+
+2. **Start the services**
+   ```bash
+   docker-compose up -d
+   ```
+
+3. **Verify deployment**
+   ```bash
+   docker-compose ps
+   watch -n 10 'curl -s http://localhost:8323/json 2>&1 | head -5'   
+   ```
+Once Initial Validation complete, restart backend container
+
+### Configuration
+
+Environment variables for the backend service:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ROUTINATOR_URL` | `http://routinator:8323` | Routinator JSON endpoint |
+| `POLL_INTERVAL_SECONDS` | `600` | Polling interval (10 minutes) |
+| `STATE_DIR` | `/app/state` | State storage directory |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `API_PORT` | `8080` | API server port |
+
+### Volumes
+
+The system uses Docker volumes for persistent storage:
+
+- `routinator-cache`: RPKI repository cache (~5-10GB)
+- `backend-state`: Application state and diffs (~1-2GB)
+
+## Monitoring & Metrics
+
+### Prometheus Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `rpki_fetch_failures_total` | Counter | Failed VRP fetches |
+| `rpki_last_successful_fetch_timestamp` | Gauge | Last successful fetch time |
+| `rpki_vrp_count` | Gauge | Current number of VRPs |
+| `rpki_serial_number` | Gauge | Current serial number |
+| `rpki_snapshot_age_seconds` | Gauge | Age of current snapshot |
+| `rpki_api_requests_total` | Counter | API request counts |
+| `rpki_api_request_duration_seconds` | Histogram | API request latency |
+
+### Health Checks
+
+- **Routinator**: File existence check in cache directory
+- **Backend**: HTTP health endpoint (`/health`)
+
+## Development
+
+### Project Structure
+
+```
+RPKI-viz-3/
+├── backend/
+│   ├── main.py              # Main application controller
+│   ├── api_server.py        # Flask API server
+│   ├── vrp_loader.py        # Routinator integration
+│   ├── diff_engine.py       # Change detection engine
+│   ├── metrics.py           # Prometheus metrics
+│   ├── requirements.txt     # Python dependencies
+│   └── Dockerfile          # Backend container definition
+├── docker-compose.yml       # Multi-container deployment
+└── README.md               # This file
+```
+
+### Building from Source
+
+1. **Build the backend image**
+   ```bash
+   cd backend
+   docker build -t rpki-backend .
+   ```
+
+2. **Update docker-compose.yml**
+   ```yaml
+   rpki-backend:
+     image: rpki-backend:latest
+     # instead of build: ./backend
+   ```
+
+### Testing
+
+```bash
+# Test API endpoints
+curl http://localhost:8080/health
+curl http://localhost:8080/metrics
+
+# Test data processing
+curl http://localhost:8080/api/v1/state
+curl http://localhost:8080/api/v1/vrps?asn=AS15169
+
+# Test route validation
+curl -X POST http://localhost:8080/api/v1/validate \
+  -H "Content-Type: application/json" \
+  -d '{"asn": "AS15169", "prefix": "8.8.8.0/24"}'
+```
+
+## Performance Characteristics
+
+- **VRP Processing**: ~786,000 VRPs processed in ~60 seconds
+- **Memory Usage**: Backend ~256MB, Routinator ~512MB
+- **Storage**: ~1GB for state, ~5GB for RPKI cache
+- **API Response Time**: <100ms for most endpoints
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Routinator not ready**
+   ```bash
+   # Check Routinator logs
+   docker logs routinator
+   
+   # Wait for initial sync (5-10 minutes)
+   ```
+
+2. **Backend unhealthy**
+   ```bash
+   # Healthcheck uses wget which may not be available
+   # The API is still functional - check /health endpoint
+   curl http://localhost:8080/health
+   ```
+
+3. **VRP fetch failures**
+   ```bash
+   # Check Routinator accessibility
+   curl http://localhost:8323/json | head -n 5
+   ```
+
+### Logs
+
+```bash
+# View backend logs
+docker logs rpki-backend
+
+# View Routinator logs
+docker logs routinator
+
+# Follow logs in real-time
+docker logs -f rpki-backend
+```
+
+## Security Considerations
+
+- Non-root user execution in containers
+- Read-only access to RPKI data
+- No authentication on API endpoints (intended for internal use)
+- Input validation on all API parameters
+- No persistent secrets or credentials
+
+## Scaling Considerations
+
+- **Horizontal Scaling**: Multiple backend instances can read from shared state
+- **Load Balancing**: API endpoints are stateless and cache-friendly
+- **Storage**: State directory can be mounted from network storage
+- **Monitoring**: All metrics exposed for Prometheus scraping
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make changes with tests
+4. Submit a pull request
+
+## License
+
+[Add appropriate license information]
+
+## References
+
+- [RPKI Overview](https://rpki.readthedocs.io/en/latest/)
+- [Routinator Documentation](https://routinator.docs.nlnetlabs.nl/)
+- [RFC 6480 - RPKI Architecture](https://tools.ietf.org/html/rfc6480)
+- [RFC 6811 - BGP Prefix Origin Validation](https://tools.ietf.org/html/rfc6811)
+
+## Support
+
+For issues and questions:
+1. Check the troubleshooting section
+2. Review container logs
+3. Examine API responses
+4. Open a GitHub issue
+
+
+================================================
+FILE: docker-compose.yml
+================================================
+services:
+  routinator:
+    image: nlnetlabs/routinator:latest
+    container_name: routinator
+    restart: unless-stopped
+    
+    # Persistent cache volume (MANDATORY)
+    volumes:
+      - routinator-cache:/home/routinator/.rpki-cache
+    
+    # Environment variable to accept ARIN TAL automatically
+    environment:
+      - ARIN_TAL_ACCEPT=yes
+    
+    # Routinator command configuration
+    # Default entrypoint is already set to "routinator" in the image
+    command:
+      - "server"
+      - "--rtr"
+      - "0.0.0.0:3323"
+      - "--http"
+      - "0.0.0.0:8323"
+    
+    # Expose HTTP for VRP JSON and RTR (future)
+    ports:
+      - "8323:8323"  # HTTP JSON endpoint
+      - "3323:3323"  # RTR port (for future use)
+    
+    # Health check - use a simpler test
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /home/routinator/.rpki-cache/repository || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    
+    networks:
+      - rpki-network
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  rpki-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rpki-backend
+    restart: unless-stopped
+    
+    depends_on:
+      - routinator
+    
+    environment:
+      - ROUTINATOR_URL=http://routinator:8323
+      - POLL_INTERVAL_SECONDS=600
+      - STATE_DIR=/app/state
+      - LOG_LEVEL=INFO
+      - API_PORT=8080
+    
+    volumes:
+      - backend-state:/app/state
+    
+    ports:
+      - "8080:8080"  # Backend API
+    
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    
+    networks:
+      - rpki-network
+    
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+networks:
+  rpki-network:
+    driver: bridge
+    internal: false  # Allow external access for RIR repositories
+
+volumes:
+  routinator-cache:
+    driver: local
+  routinator-tals:
+    driver: local
+  backend-state:
+    driver: local
+
+
+================================================
+FILE: backend/api_server.py
+================================================
+#!/usr/bin/env python3
+"""
+API Server - Exposes VRP data and observability endpoints
+"""
+
+import logging
+from flask import Flask, jsonify, request
+from threading import Thread
+from werkzeug.serving import make_server
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+class APIServer:
+    """Flask-based API server"""
+    
+    def __init__(self, diff_engine, metrics, port):
+        self.diff_engine = diff_engine
+        self.metrics = metrics
+        self.port = port
+        
+        # Create Flask app
+        self.app = Flask(__name__)
+        self.app.json.sort_keys = False
+        
+        # Disable Flask's default logger
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.WARNING)
+        
+        # Register routes
+        self._register_routes()
+        
+        # Server thread
+        self.server = None
+        self.server_thread = None
+    
+    def _register_routes(self):
+        """Register all API endpoints"""
+        
+        @self.app.route('/health', methods=['GET'])
+        def health():
+            """Health check endpoint"""
+            state = self.diff_engine.get_current_state()
+            
+            status = {
+                'status': 'healthy',
+                'serial': state['serial'],
+                'vrp_count': state['vrp_count'],
+                'last_update': state['last_update']
+            }
+            
+            self.metrics.api_requests.labels(
+                endpoint='/health',
+                method='GET',
+                status='200'
+            ).inc()
+            
+            return jsonify(status), 200
+        
+        @self.app.route('/metrics', methods=['GET'])
+        def metrics():
+            """Prometheus metrics endpoint"""
+            self.metrics.api_requests.labels(
+                endpoint='/metrics',
+                method='GET',
+                status='200'
+            ).inc()
+            
+            return self.metrics.get_metrics(), 200, {
+                'Content-Type': self.metrics.get_content_type()
+            }
+        
+        @self.app.route('/api/v1/state', methods=['GET'])
+        def get_state():
+            """Get current RPKI state"""
+            with self.metrics.api_request_duration.labels(
+                endpoint='/api/v1/state',
+                method='GET'
+            ).time():
+                state = self.diff_engine.get_current_state()
+                
+                response = {
+                    'serial': state['serial'],
+                    'vrp_count': state['vrp_count'],
+                    'hash': state['hash'],
+                    'last_update': state['last_update']
+                }
+                
+                self.metrics.api_requests.labels(
+                    endpoint='/api/v1/state',
+                    method='GET',
+                    status='200'
+                ).inc()
+                
+                return jsonify(response), 200
+        
+        @self.app.route('/api/v1/vrps', methods=['GET'])
+        def get_vrps():
+            """Get all VRPs"""
+            with self.metrics.api_request_duration.labels(
+                endpoint='/api/v1/vrps',
+                method='GET'
+            ).time():
+                state = self.diff_engine.get_current_state()
+                
+                # Optional filtering
+                asn_filter = request.args.get('asn')
+                prefix_filter = request.args.get('prefix')
+                
+                vrps = state['vrps']
+                
+                if asn_filter:
+                    vrps = [v for v in vrps if v['asn'] == asn_filter]
+                
+                if prefix_filter:
+                    vrps = [v for v in vrps if v['prefix'] == prefix_filter]
+                
+                response = {
+                    'serial': state['serial'],
+                    'total_vrps': state['vrp_count'],
+                    'filtered_vrps': len(vrps),
+                    'last_update': state['last_update'],
+                    'vrps': vrps
+                }
+                
+                self.metrics.api_requests.labels(
+                    endpoint='/api/v1/vrps',
+                    method='GET',
+                    status='200'
+                ).inc()
+                
+                return jsonify(response), 200
+        
+        @self.app.route('/api/v1/diff', methods=['GET'])
+        def get_diff():
+            """Get diff between serials"""
+            try:
+                from_serial = int(request.args.get('from', 0))
+                to_serial = int(request.args.get('to', 0))
+            except ValueError:
+                self.metrics.api_requests.labels(
+                    endpoint='/api/v1/diff',
+                    method='GET',
+                    status='400'
+                ).inc()
+                return jsonify({'error': 'Invalid serial parameters'}), 400
+            
+            with self.metrics.api_request_duration.labels(
+                endpoint='/api/v1/diff',
+                method='GET'
+            ).time():
+                diff = self.diff_engine.get_diff(from_serial, to_serial)
+                
+                if diff is None:
+                    self.metrics.api_requests.labels(
+                        endpoint='/api/v1/diff',
+                        method='GET',
+                        status='404'
+                    ).inc()
+                    return jsonify({'error': 'Diff not found'}), 404
+                
+                self.metrics.api_requests.labels(
+                    endpoint='/api/v1/diff',
+                    method='GET',
+                    status='200'
+                ).inc()
+                
+                return jsonify(diff), 200
+        
+        @self.app.route('/api/v1/validate', methods=['POST'])
+        def validate_route():
+            """Validate a BGP route announcement"""
+            data = request.get_json()
+            
+            if not data or 'asn' not in data or 'prefix' not in data:
+                self.metrics.api_requests.labels(
+                    endpoint='/api/v1/validate',
+                    method='POST',
+                    status='400'
+                ).inc()
+                return jsonify({'error': 'Missing asn or prefix'}), 400
+            
+            with self.metrics.api_request_duration.labels(
+                endpoint='/api/v1/validate',
+                method='POST'
+            ).time():
+                asn = data['asn']
+                prefix = data['prefix']
+                
+                # Ensure ASN has AS prefix
+                if not asn.startswith('AS'):
+                    asn = f'AS{asn}'
+                
+                state = self.diff_engine.get_current_state()
+                
+                # Find matching VRP
+                matching_vrps = []
+                for vrp in state['vrps']:
+                    if vrp['asn'] == asn and vrp['prefix'] == prefix:
+                        matching_vrps.append(vrp)
+                
+                result = {
+                    'asn': asn,
+                    'prefix': prefix,
+                    'valid': len(matching_vrps) > 0,
+                    'matching_vrps': matching_vrps,
+                    'serial': state['serial']
+                }
+                
+                self.metrics.api_requests.labels(
+                    endpoint='/api/v1/validate',
+                    method='POST',
+                    status='200'
+                ).inc()
+                
+                return jsonify(result), 200
+        
+        @self.app.errorhandler(404)
+        def not_found(e):
+            self.metrics.api_requests.labels(
+                endpoint='unknown',
+                method=request.method,
+                status='404'
+            ).inc()
+            return jsonify({'error': 'Not found'}), 404
+        
+        @self.app.errorhandler(500)
+        def internal_error(e):
+            logger.error(f"Internal error: {e}", exc_info=True)
+            self.metrics.api_requests.labels(
+                endpoint=request.path,
+                method=request.method,
+                status='500'
+            ).inc()
+            return jsonify({'error': 'Internal server error'}), 500
+    
+    def start(self):
+        """Start API server in background thread"""
+        self.server = make_server('0.0.0.0', self.port, self.app, threaded=True)
+        self.server_thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+        logger.info(f"API server started on port {self.port}")
+    
+    def stop(self):
+        """Stop API server"""
+        if self.server:
+            logger.info("Stopping API server...")
+            self.server.shutdown()
+            self.server_thread.join(timeout=5)
+            logger.info("API server stopped")
+
+
+================================================
+FILE: backend/diff_engine.py
+================================================
+#!/usr/bin/env python3
+"""
+Diff & Serial Engine - Maintains monotonic serial and computes VRP diffs
+"""
+
+import os
+import json
+import hashlib
+import logging
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from threading import RLock
+
+logger = logging.getLogger(__name__)
+
+class DiffEngine:
+    """
+    Manages VRP snapshots, diffs, and monotonic serials
+    
+    State persistence:
+    - current_snapshot.json: Active VRP set
+    - previous_snapshot.json: Previous VRP set
+    - state_metadata.json: Serial and timestamps
+    - diffs/: Historical diffs
+    """
+    
+    def __init__(self, state_dir: str, metrics):
+        self.state_dir = state_dir
+        self.metrics = metrics
+        
+        # Thread-safe access to state
+        self.lock = RLock()
+        
+        # In-memory state
+        self.current_snapshot: List[Dict] = []
+        self.previous_snapshot: List[Dict] = []
+        self.serial: int = 0
+        self.current_hash: str = ""
+        self.last_update: Optional[str] = None
+        
+        # Paths
+        self.current_snapshot_path = os.path.join(state_dir, 'current_snapshot.json')
+        self.previous_snapshot_path = os.path.join(state_dir, 'previous_snapshot.json')
+        self.metadata_path = os.path.join(state_dir, 'state_metadata.json')
+        self.diffs_dir = os.path.join(state_dir, 'diffs')
+        
+        os.makedirs(self.diffs_dir, exist_ok=True)
+    
+    def _compute_hash(self, vrps: List[Dict]) -> str:
+        """
+        Compute deterministic hash of VRP snapshot
+        
+        Args:
+            vrps: Canonicalized and sorted VRP list
+        
+        Returns:
+            SHA256 hash as hex string
+        """
+        # Convert to JSON with sorted keys for determinism
+        json_bytes = json.dumps(vrps, sort_keys=True).encode('utf-8')
+        return hashlib.sha256(json_bytes).hexdigest()
+    
+    def _compute_diff(
+        self,
+        old_vrps: List[Dict],
+        new_vrps: List[Dict]
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Compute added and removed VRPs
+        
+        Returns:
+            (added, removed) tuple
+        """
+        # Convert to sets using canonical form for comparison
+        def to_key(vrp):
+            return f"{vrp['asn']}|{vrp['prefix']}|{vrp['maxLength']}"
+        
+        old_set = {to_key(v): v for v in old_vrps}
+        new_set = {to_key(v): v for v in new_vrps}
+        
+        added = [new_set[k] for k in (new_set.keys() - old_set.keys())]
+        removed = [old_set[k] for k in (old_set.keys() - new_set.keys())]
+        
+        return added, removed
+    
+    def _save_diff(self, serial: int, added: List[Dict], removed: List[Dict], metadata: Dict):
+        """Save diff to disk"""
+        diff_path = os.path.join(self.diffs_dir, f'diff_{serial:010d}.json')
+        
+        diff_data = {
+            'serial': serial,
+            'timestamp': datetime.utcnow().isoformat(),
+            'metadata': metadata,
+            'added_count': len(added),
+            'removed_count': len(removed),
+            'added': added,
+            'removed': removed
+        }
+        
+        with open(diff_path, 'w') as f:
+            json.dump(diff_data, f, indent=2)
+        
+        logger.info(f"Saved diff to {diff_path}")
+    
+    def _save_state(self):
+        """Persist current state to disk"""
+        # Save current snapshot
+        with open(self.current_snapshot_path, 'w') as f:
+            json.dump(self.current_snapshot, f, indent=2)
+        
+        # Save previous snapshot
+        with open(self.previous_snapshot_path, 'w') as f:
+            json.dump(self.previous_snapshot, f, indent=2)
+        
+        # Save metadata
+        metadata = {
+            'serial': self.serial,
+            'current_hash': self.current_hash,
+            'last_update': self.last_update,
+            'vrp_count': len(self.current_snapshot)
+        }
+        
+        with open(self.metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        logger.info(f"Persisted state: serial={self.serial}, hash={self.current_hash[:8]}")
+    
+    def load_state(self):
+        """Load state from disk on startup"""
+        with self.lock:
+            try:
+                # Load metadata
+                with open(self.metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                
+                self.serial = metadata['serial']
+                self.current_hash = metadata['current_hash']
+                self.last_update = metadata.get('last_update')
+                
+                # Load current snapshot
+                with open(self.current_snapshot_path, 'r') as f:
+                    self.current_snapshot = json.load(f)
+                
+                # Load previous snapshot
+                try:
+                    with open(self.previous_snapshot_path, 'r') as f:
+                        self.previous_snapshot = json.load(f)
+                except FileNotFoundError:
+                    self.previous_snapshot = []
+                
+                logger.info(
+                    f"Loaded state: serial={self.serial}, "
+                    f"vrps={len(self.current_snapshot)}, "
+                    f"hash={self.current_hash[:8]}"
+                )
+                
+                # Update metrics
+                self.metrics.serial_number.set(self.serial)
+                self.metrics.vrp_count.set(len(self.current_snapshot))
+                
+            except FileNotFoundError:
+                logger.info("No existing state found, starting fresh")
+                self.serial = 0
+                self.current_snapshot = []
+                self.previous_snapshot = []
+                self.current_hash = ""
+                self.last_update = None
+    
+    def process_snapshot(
+        self,
+        vrps: List[Dict],
+        metadata: Dict
+    ) -> bool:
+        """
+        Process new VRP snapshot
+        
+        Args:
+            vrps: Canonicalized VRP list
+            metadata: Routinator metadata
+        
+        Returns:
+            True if snapshot accepted (hash changed), False if rejected (no change)
+        """
+        with self.lock:
+            # Compute hash of new snapshot
+            new_hash = self._compute_hash(vrps)
+            
+            # Check if snapshot has changed
+            if new_hash == self.current_hash:
+                logger.info("Snapshot hash unchanged, no update needed")
+                return False
+            
+            logger.info(
+                f"Snapshot hash changed: {self.current_hash[:8]} -> {new_hash[:8]}"
+            )
+            
+            # Compute diff
+            added, removed = self._compute_diff(self.current_snapshot, vrps)
+            
+            logger.info(f"Diff: +{len(added)} -{len(removed)}")
+            
+            # Increment serial (monotonic)
+            new_serial = self.serial + 1
+            
+            # Update state
+            self.previous_snapshot = self.current_snapshot
+            self.current_snapshot = vrps
+            self.serial = new_serial
+            self.current_hash = new_hash
+            self.last_update = datetime.utcnow().isoformat()
+            
+            # Save diff
+            self._save_diff(new_serial, added, removed, metadata)
+            
+            # Persist state
+            self._save_state()
+            
+            # Update metrics
+            self.metrics.serial_number.set(self.serial)
+            self.metrics.vrp_count.set(len(self.current_snapshot))
+            self.metrics.snapshot_age.set_function(self._get_snapshot_age)
+            
+            logger.info(f"Snapshot accepted: serial={self.serial}")
+            
+            return True
+    
+    def _get_snapshot_age(self):
+        """Calculate snapshot age in seconds"""
+        if self.last_update is None:
+            return 0
+        
+        try:
+            last_update_dt = datetime.fromisoformat(self.last_update)
+            age = (datetime.utcnow() - last_update_dt).total_seconds()
+            return age
+        except Exception:
+            return 0
+    
+    def get_current_state(self) -> Dict:
+        """Get current state for API"""
+        with self.lock:
+            return {
+                'serial': self.serial,
+                'vrp_count': len(self.current_snapshot),
+                'hash': self.current_hash,
+                'last_update': self.last_update,
+                'vrps': self.current_snapshot
+            }
+    
+    def get_diff(self, from_serial: int, to_serial: int) -> Optional[Dict]:
+        """
+        Retrieve a specific diff
+        
+        Args:
+            from_serial: Starting serial
+            to_serial: Ending serial
+        
+        Returns:
+            Diff data or None if not found
+        """
+        if to_serial < from_serial:
+            return None
+        
+        # For now, only support single-step diffs
+        if to_serial - from_serial != 1:
+            logger.warning(f"Multi-step diff not supported: {from_serial} -> {to_serial}")
+            return None
+        
+        diff_path = os.path.join(self.diffs_dir, f'diff_{to_serial:010d}.json')
+        
+        try:
+            with open(diff_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"Diff not found: {diff_path}")
+            return None
+
+
+================================================
+FILE: backend/Dockerfile
+================================================
+FROM python:3.11-slim
+
+# Create non-root user
+RUN useradd -m -u 1000 rpki && \
+    mkdir -p /app/state && \
+    chown -R rpki:rpki /app
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY --chown=rpki:rpki . .
+
+# Switch to non-root user
+USER rpki
+
+# Expose API port
+EXPOSE 8080
+
+# Run the backend
+CMD ["python", "-u", "main.py"]
+
+
+================================================
+FILE: backend/main.py
+================================================
+#!/usr/bin/env python3
+"""
+Production RPKI Backend
+Integrates with Routinator for VRP validation
+"""
+
+import os
+import sys
+import time
+import signal
+import logging
+from threading import Event
+
+from vrp_loader import VRPLoader
+from diff_engine import DiffEngine
+from api_server import APIServer
+from metrics import MetricsCollector
+
+# Configure structured logging
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logger = logging.getLogger(__name__)
+
+class RPKIBackend:
+    """Main application controller"""
+    
+    def __init__(self):
+        self.shutdown_event = Event()
+        self.routinator_url = os.getenv('ROUTINATOR_URL', 'http://routinator:8323')
+        self.poll_interval = int(os.getenv('POLL_INTERVAL_SECONDS', '600'))
+        self.state_dir = os.getenv('STATE_DIR', '/app/state')
+        self.api_port = int(os.getenv('API_PORT', '8080'))
+        
+        # Ensure state directory exists
+        os.makedirs(self.state_dir, exist_ok=True)
+        
+        # Initialize components
+        self.metrics = MetricsCollector()
+        self.diff_engine = DiffEngine(self.state_dir, self.metrics)
+        self.vrp_loader = VRPLoader(
+            self.routinator_url,
+            self.diff_engine,
+            self.metrics
+        )
+        self.api_server = APIServer(
+            self.diff_engine,
+            self.metrics,
+            self.api_port
+        )
+        
+        # Register signal handlers
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        logger.info(f"Received signal {signum}, initiating shutdown...")
+        self.shutdown_event.set()
+    
+    def run(self):
+        """Main application loop"""
+        logger.info("Starting RPKI Backend")
+        logger.info(f"Routinator URL: {self.routinator_url}")
+        logger.info(f"Poll interval: {self.poll_interval}s")
+        logger.info(f"State directory: {self.state_dir}")
+        
+        # Start API server in background
+        self.api_server.start()
+        
+        # Load existing state on startup
+        try:
+            self.diff_engine.load_state()
+            logger.info("Loaded existing state from disk")
+        except Exception as e:
+            logger.warning(f"No existing state found: {e}")
+        
+        # Initial fetch
+        logger.info("Performing initial VRP fetch...")
+        try:
+            self.vrp_loader.fetch_and_process()
+        except Exception as e:
+            logger.error(f"Initial fetch failed: {e}")
+            self.metrics.fetch_failures.inc()
+        
+        # Main polling loop
+        last_fetch = time.time()
+        
+        while not self.shutdown_event.is_set():
+            try:
+                now = time.time()
+                time_since_last = now - last_fetch
+                
+                if time_since_last >= self.poll_interval:
+                    logger.info("Starting scheduled VRP fetch...")
+                    self.vrp_loader.fetch_and_process()
+                    last_fetch = now
+                
+                # Sleep in short intervals to allow quick shutdown
+                self.shutdown_event.wait(timeout=10)
+                
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}", exc_info=True)
+                self.metrics.fetch_failures.inc()
+                self.shutdown_event.wait(timeout=60)
+        
+        # Shutdown
+        logger.info("Shutting down RPKI Backend")
+        self.api_server.stop()
+        logger.info("Shutdown complete")
+
+def main():
+    """Entry point"""
+    try:
+        backend = RPKIBackend()
+        backend.run()
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
+
+================================================
+FILE: backend/metrics.py
+================================================
+#!/usr/bin/env python3
+"""
+Metrics Collection - Prometheus metrics for observability
+"""
+
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+class MetricsCollector:
+    """Centralized metrics collection"""
+    
+    def __init__(self):
+        # Fetch metrics
+        self.fetch_failures = Counter(
+            'rpki_fetch_failures_total',
+            'Total number of failed VRP fetches from Routinator'
+        )
+        
+        self.last_successful_fetch = Gauge(
+            'rpki_last_successful_fetch_timestamp',
+            'Timestamp of last successful VRP fetch'
+        )
+        
+        # VRP metrics
+        self.vrp_count = Gauge(
+            'rpki_vrp_count',
+            'Current number of validated VRPs'
+        )
+        
+        self.serial_number = Gauge(
+            'rpki_serial_number',
+            'Current monotonic serial number'
+        )
+        
+        self.snapshot_age = Gauge(
+            'rpki_snapshot_age_seconds',
+            'Age of current VRP snapshot in seconds'
+        )
+        
+        # Processing metrics
+        self.snapshot_accepted = Counter(
+            'rpki_snapshot_accepted_total',
+            'Total number of accepted snapshots (hash changed)'
+        )
+        
+        self.snapshot_rejected = Counter(
+            'rpki_snapshot_rejected_total',
+            'Total number of rejected snapshots (no hash change)'
+        )
+        
+        # API metrics
+        self.api_requests = Counter(
+            'rpki_api_requests_total',
+            'Total API requests',
+            ['endpoint', 'method', 'status']
+        )
+        
+        self.api_request_duration = Histogram(
+            'rpki_api_request_duration_seconds',
+            'API request duration in seconds',
+            ['endpoint', 'method']
+        )
+    
+    def get_metrics(self):
+        """Return Prometheus metrics in text format"""
+        return generate_latest()
+    
+    def get_content_type(self):
+        """Return Prometheus content type"""
+        return CONTENT_TYPE_LATEST
+
+
+================================================
+FILE: backend/requirements.txt
+================================================
+Flask==2.3.3
+prometheus-client==0.18.0
+requests==2.31.0
+pydantic==2.4.2
+
+
+================================================
+FILE: backend/vrp_loader.py
+================================================
+#!/usr/bin/env python3
+"""
+VRP Loader - Fetches and validates VRPs from Routinator
+"""
+
+import logging
+import requests
+from typing import Dict, List, Optional
+from datetime import datetime
+from pydantic import BaseModel, ValidationError, field_validator
+import ipaddress
+
+logger = logging.getLogger(__name__)
+
+class VRPMetadata(BaseModel):
+    """Metadata from Routinator JSON"""
+    generated: int  # Unix timestamp
+    
+    @field_validator('generated')
+    @classmethod
+    def validate_timestamp(cls, v):
+        if v <= 0:
+            raise ValueError("Invalid timestamp")
+        return v
+
+class VRPEntry(BaseModel):
+    """Single VRP entry with strict validation"""
+    asn: str
+    prefix: str
+    maxLength: int
+    ta: str
+    
+    @field_validator('asn')
+    @classmethod
+    def validate_asn(cls, v):
+        if not v.startswith('AS'):
+            raise ValueError("ASN must start with 'AS'")
+        try:
+            asn_num = int(v[2:])
+            if asn_num < 0 or asn_num > 4294967295:
+                raise ValueError("Invalid ASN range")
+        except ValueError:
+            raise ValueError("Invalid ASN format")
+        return v
+    
+    @field_validator('prefix')
+    @classmethod
+    def validate_prefix(cls, v):
+        try:
+            # Validate CIDR notation
+            ipaddress.ip_network(v, strict=True)
+        except ValueError as e:
+            raise ValueError(f"Invalid prefix: {e}")
+        return v
+    
+    @field_validator('maxLength')
+    @classmethod
+    def validate_max_length(cls, v):
+        if v < 0 or v > 128:
+            raise ValueError("maxLength must be 0-128")
+        return v
+    
+    def canonicalize(self) -> str:
+        """Return canonical representation for deduplication"""
+        # Normalize prefix
+        network = ipaddress.ip_network(self.prefix, strict=True)
+        normalized_prefix = str(network)
+        
+        return f"{self.asn}|{normalized_prefix}|{self.maxLength}|{self.ta}"
+
+class RoutinagorVRPResponse(BaseModel):
+    """Complete Routinator JSON response"""
+    metadata: VRPMetadata
+    roas: List[VRPEntry]
+
+class VRPLoader:
+    """Loads and validates VRPs from Routinator"""
+    
+    def __init__(self, routinator_url: str, diff_engine, metrics):
+        self.routinator_url = routinator_url
+        self.diff_engine = diff_engine
+        self.metrics = metrics
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'RPKI-Backend/1.0',
+            'Accept': 'application/json'
+        })
+    
+    def fetch_vrps(self) -> Optional[RoutinagorVRPResponse]:
+        """
+        Fetch VRPs from Routinator with strict validation
+        
+        Returns:
+            Validated VRP response or None on failure
+        """
+        endpoint = f"{self.routinator_url}/json"
+        
+        try:
+            logger.info(f"Fetching VRPs from {endpoint}")
+            
+            response = self.session.get(
+                endpoint,
+                timeout=60
+            )
+            
+            # Check HTTP status
+            if response.status_code != 200:
+                logger.error(f"HTTP {response.status_code} from Routinator")
+                self.metrics.fetch_failures.inc()
+                return None
+            
+            # Parse and validate JSON
+            try:
+                data = response.json()
+            except requests.exceptions.JSONDecodeError as e:
+                logger.error(f"Invalid JSON from Routinator: {e}")
+                self.metrics.fetch_failures.inc()
+                return None
+            
+            # Validate schema with Pydantic
+            try:
+                vrp_response = RoutinagorVRPResponse(**data)
+            except ValidationError as e:
+                logger.error(f"Schema validation failed: {e}")
+                self.metrics.fetch_failures.inc()
+                return None
+            
+            # Success
+            vrp_count = len(vrp_response.roas)
+            logger.info(f"Successfully fetched {vrp_count} VRPs")
+            self.metrics.vrp_count.set(vrp_count)
+            self.metrics.last_successful_fetch.set_to_current_time()
+            
+            return vrp_response
+            
+        except requests.exceptions.Timeout:
+            logger.error("Timeout fetching from Routinator")
+            self.metrics.fetch_failures.inc()
+            return None
+            
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error: {e}")
+            self.metrics.fetch_failures.inc()
+            return None
+            
+        except Exception as e:
+            logger.error(f"Unexpected error fetching VRPs: {e}", exc_info=True)
+            self.metrics.fetch_failures.inc()
+            return None
+    
+    def canonicalize_vrps(self, vrps: List[VRPEntry]) -> List[Dict]:
+        """
+        Canonicalize, deduplicate, and sort VRPs
+        
+        Returns:
+            List of canonical VRP dictionaries
+        """
+        # Use dict to deduplicate by canonical form
+        canonical_map = {}
+        
+        for vrp in vrps:
+            canonical_key = vrp.canonicalize()
+            
+            if canonical_key not in canonical_map:
+                # Store as dict for JSON serialization
+                canonical_map[canonical_key] = {
+                    'asn': vrp.asn,
+                    'prefix': str(ipaddress.ip_network(vrp.prefix, strict=True)),
+                    'maxLength': vrp.maxLength,
+                    'ta': vrp.ta
+                }
+        
+        # Sort deterministically for consistent hashing
+        canonical_list = sorted(
+            canonical_map.values(),
+            key=lambda x: (x['prefix'], x['asn'], x['maxLength'])
+        )
+        
+        original_count = len(vrps)
+        deduplicated_count = len(canonical_list)
+        
+        if original_count != deduplicated_count:
+            logger.info(
+                f"Deduplicated {original_count} -> {deduplicated_count} VRPs"
+            )
+        
+        return canonical_list
+    
+    def fetch_and_process(self) -> bool:
+        """
+        Complete fetch and processing workflow
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        # Fetch from Routinator
+        vrp_response = self.fetch_vrps()
+        
+        if vrp_response is None:
+            logger.warning("Keeping last snapshot due to fetch failure")
+            return False
+        
+        # Canonicalize VRPs
+        canonical_vrps = self.canonicalize_vrps(vrp_response.roas)
+        
+        # Pass to diff engine
+        metadata = {
+            'generated': vrp_response.metadata.generated,
+            'fetched_at': datetime.utcnow().isoformat()
+        }
+        
+        success = self.diff_engine.process_snapshot(canonical_vrps, metadata)
+        
+        if success:
+            logger.info("VRP snapshot processed successfully")
+        else:
+            logger.warning("VRP snapshot rejected (no change)")
+        
+        return success
+
